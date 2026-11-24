@@ -40,9 +40,13 @@ final class Roster {
             String token = id.toString().replace("-", "").substring(0, 12);
             legacyProfile = "AFP_" + token;
             profile = "AFP~" + token;
+            defaultName = defaultName(id);
+        }
+
+        static String defaultName(UUID id) {
             String stem = NAME_STEMS[(int) (id.getLeastSignificantBits() & 15)];
             String suffix = Long.toUnsignedString(id.getMostSignificantBits() >>> 32, 36);
-            defaultName = stem + suffix;
+            return stem + suffix;
         }
         String profile() { return profile; }
         String nativeName() { return name().matches("[A-Za-z0-9_]{1,16}") ? name() : defaultName; }

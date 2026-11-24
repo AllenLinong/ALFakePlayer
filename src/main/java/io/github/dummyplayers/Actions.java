@@ -108,7 +108,7 @@ final class Actions {
         double entityReach = dummy.entityInteractionRange();
         Vec3 eye = dummy.getEyePosition();
         Vec3 look = dummy.getViewVector(1.0F);
-        HitResult block = use ? dummy.pick(Math.max(blockReach, entityReach), 1.0F, false) : null;
+        HitResult block = use ? dummy.pick(blockReach, 1.0F, false) : null;
         EntityHitResult entity = entry.attack ? attackTarget(eye, look) : null;
         if (entity == null && use) {
             double max = Math.min(entityReach * entityReach, block.getType() == HitResult.Type.MISS
@@ -162,7 +162,9 @@ final class Actions {
         }
         if (use && mining == null && !dummy.isUsingItem()) {
             nextUse = tick + plugin.useInterval;
-            if (entity != null || target == null || !dummy.level().mayInteract(dummy, target.getBlockPos())) return;
+            if (entity != null || target == null || !ownedAndLoaded(target.getBlockPos())
+                || !ownedAndLoaded(target.getBlockPos().relative(target.getDirection()))
+                || !dummy.level().mayInteract(dummy, target.getBlockPos())) return;
             if (dummy.isCreative() || !(CraftMagicNumbers.getItem(placementBlock) instanceof BlockItem blockItem) || !equipPlacement(blockItem)) {
                 nextUse = tick + Math.max(plugin.useInterval, plugin.idleMaxInterval);
                 return;
@@ -229,48 +231,67 @@ final class Actions {
     }
 
     private BlockHitResult miningTarget(Vec3 eye, double reach, int minimumDurability) {
-        BlockPos upper = dummy.blockPosition().relative(Direction.fromYRot(yaw)).above();
+        Direction forward = Direction.fromYRot(yaw);
+        BlockPos origin = dummy.blockPosition();
+        double eyeOffset = (eye.x - origin.getX() - 0.5) * forward.getStepX()
+            + (eye.z - origin.getZ() - 0.5) * forward.getStepZ();
+        int lastColumn = (int) Math.floor(reach + eyeOffset + 0.5);
         var level = dummy.level();
-        if (!Bukkit.isOwnedByCurrentRegion(dummy.getBukkitEntity().getWorld(), upper.getX() >> 4, upper.getZ() >> 4)
-            || !level.hasChunkAt(upper)) return null;
         var inventory = dummy.getInventory();
-        BlockPos lower = upper.below();
-        BlockState upperState = level.getBlockState(upper), lowerState = level.getBlockState(lower);
-        boolean filtered = false, matchUpper = false, matchLower = false;
+        Set<Block> samples = null;
         for (int slot = 0; slot < 9; slot++) {
             ItemStack sample = inventory.getItem(slot);
             if (sample.isEmpty() || !(sample.getItem() instanceof BlockItem blockItem)) continue;
-            filtered = true;
-            matchUpper |= sameBlock(upperState.getBlock(), blockItem.getBlock());
-            matchLower |= sameBlock(lowerState.getBlock(), blockItem.getBlock());
+            if (samples == null) samples = new java.util.HashSet<>();
+            samples.add(blockItem.getBlock());
         }
-        BlockHitResult upperHit = !filtered || matchUpper ? miningHit(eye, reach, upper, upperState, minimumDurability) : null;
-        return upperHit != null ? upperHit
-            : !filtered || matchLower ? miningHit(eye, reach, lower, lowerState, minimumDurability) : null;
+        for (int distance = 1; distance <= lastColumn; distance++) {
+            BlockPos lower = origin.relative(forward, distance);
+            if (!ownedAndLoaded(lower)) break;
+            BlockPos upper = lower.above();
+            BlockState upperState = level.getBlockState(upper);
+            if (matchesSample(samples, upperState)) {
+                BlockHitResult hit = miningHit(eye, reach, upper, upperState, minimumDurability);
+                if (hit != null) return hit;
+            }
+            BlockState lowerState = level.getBlockState(lower);
+            if (matchesSample(samples, lowerState)) {
+                BlockHitResult hit = miningHit(eye, reach, lower, lowerState, minimumDurability);
+                if (hit != null) return hit;
+            }
+        }
+        return null;
+    }
+
+    private boolean ownedAndLoaded(BlockPos position) {
+        return Bukkit.isOwnedByCurrentRegion(dummy.getBukkitEntity().getWorld(), position.getX() >> 4, position.getZ() >> 4)
+            && dummy.level().hasChunkAt(position);
+    }
+
+    private static boolean matchesSample(Set<Block> samples, BlockState state) {
+        return samples == null || samples.contains(state.getBlock())
+            || state.getBlock() instanceof net.minecraft.world.level.block.AnvilBlock
+                && samples.stream().anyMatch(net.minecraft.world.level.block.AnvilBlock.class::isInstance);
     }
 
     private BlockHitResult miningHit(Vec3 eye, double reach, BlockPos target, BlockState state, int minimumDurability) {
         var level = dummy.level();
         if (state.isAir() || level.isOutsideBuildHeight(target) || !level.mayInteract(dummy, target)
             || state.getDestroySpeed(level, target) < 0) return null;
-        var inventory = dummy.getInventory();
-        if (!java.util.stream.IntStream.range(0, 37).anyMatch(index -> {
-            ItemStack stack = inventory.getItem(index == 36 ? 40 : index);
-            return usable(stack, minimumDurability) && miningTool(stack, state);
-        })) return null;
         Vec3 center = Vec3.atCenterOf(target);
         if (eye.y > center.y) {
             Direction towardDummy = Direction.fromYRot(yaw).getOpposite();
             center = center.add(towardDummy.getStepX() * 0.49, 0, towardDummy.getStepZ() * 0.49);
         }
         BlockHitResult hit = level.clip(new ClipContext(eye, center, ClipContext.Block.OUTLINE, ClipContext.Fluid.NONE, dummy));
-        return hit.getType() == HitResult.Type.BLOCK && target.equals(hit.getBlockPos())
-            && eye.distanceToSqr(hit.getLocation()) <= reach * reach ? hit : null;
-    }
-
-    private static boolean sameBlock(Block target, Block sample) {
-        return target == sample || target instanceof net.minecraft.world.level.block.AnvilBlock
-            && sample instanceof net.minecraft.world.level.block.AnvilBlock;
+        if (hit.getType() != HitResult.Type.BLOCK || !target.equals(hit.getBlockPos())
+            || eye.distanceToSqr(hit.getLocation()) > reach * reach) return null;
+        var inventory = dummy.getInventory();
+        for (int index = 0; index <= 36; index++) {
+            ItemStack stack = inventory.getItem(index == 36 ? 40 : index);
+            if (usable(stack, minimumDurability) && miningTool(stack, state)) return hit;
+        }
+        return null;
     }
 
     private static boolean miningTool(ItemStack stack, BlockState state) {

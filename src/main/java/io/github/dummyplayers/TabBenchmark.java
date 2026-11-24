@@ -8,6 +8,7 @@ import net.minecraft.network.protocol.game.ClientboundPlayerInfoUpdatePacket.Ent
 import net.minecraft.network.protocol.Packet;
 import net.minecraft.server.network.ServerGamePacketListenerImpl;
 import net.minecraft.world.level.GameType;
+import org.bukkit.Bukkit;
 import org.bukkit.command.CommandSender;
 import org.bukkit.craftbukkit.entity.CraftPlayer;
 import org.bukkit.entity.Player;
@@ -15,8 +16,11 @@ import org.bukkit.entity.Player;
 import java.util.ArrayList;
 import java.util.EnumSet;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 
 final class TabBenchmark {
@@ -37,7 +41,10 @@ final class TabBenchmark {
             try {
                 int count = Integer.parseInt(args[2]);
                 if (count >= 1 && count <= MAX_ENTRIES) {
-                    replace(count);
+                    Set<String> occupied = new HashSet<>();
+                    for (Player player : Bukkit.getOnlinePlayers()) occupied.add(player.getName().toLowerCase(Locale.ROOT));
+                    for (Roster.Entry entry : plugin.roster.entries.values()) occupied.add(entry.nativeName().toLowerCase(Locale.ROOT));
+                    replace(count, occupied);
                     plugin.msg(sender, "benchmark-spawned", "count", count);
                     return;
                 }
@@ -46,12 +53,17 @@ final class TabBenchmark {
         plugin.msg(sender, "benchmark-help", "max", MAX_ENTRIES);
     }
 
-    private synchronized void replace(int count) {
+    private synchronized void replace(int count, Set<String> occupied) {
         var batch = new ArrayList<Entry>(count);
         var newIds = new ArrayList<UUID>(count);
         for (int index = 0; index < count; index++) {
-            UUID id = UUID.randomUUID();
-            var profile = new GameProfile(id, "AFP_Test_" + id.toString().substring(0, 7));
+            UUID id;
+            String name;
+            do {
+                id = UUID.randomUUID();
+                name = Roster.Entry.defaultName(id);
+            } while (!occupied.add(name.toLowerCase(Locale.ROOT)));
+            var profile = new GameProfile(id, name);
             batch.add(new Entry(id, profile, true, 0, GameType.SURVIVAL, null, true, 0, null));
             newIds.add(id);
         }

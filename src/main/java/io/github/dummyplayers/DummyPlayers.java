@@ -867,7 +867,8 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
         boolean direction = action.equals("direction") || action.equals("dir");
         DummyTier commandTier = action.equals("spawn") || action.equals("召唤") ? null : DummyTier.fromCommand(action);
         boolean spawn = commandTier != null || action.equals("spawn") || action.equals("召唤");
-        boolean open = action.equals("open") || action.equals("背包");
+        boolean open = action.equals("b") || action.equals("open") || action.equals("背包");
+        if (action.equals("b") && args.length != 2) { sendHelp(player); return true; }
         DummyTier requestedTier = commandTier;
         int slot;
         if (spawn) {
@@ -949,7 +950,7 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
         if (args.length == 1) {
             if (sender instanceof Player player && player.hasPermission(USE)) {
                 options.addAll(List.of("menu", "spawn", "spawnnormal", "spawnpro", "spawnpromax", "normal", "pro", "promax",
-                    "open", "rename", "list", "direction", "dir", "despawn", "delete", "kill", "help"));
+                    "b", "rename", "list", "direction", "dir", "despawn", "delete", "kill", "help"));
                 if (player.hasPermission(TELEPORT)) options.addAll(TELEPORT_ACTIONS);
                 roster.entries.values().stream().filter(entry -> allowed(player, entry)).forEach(entry -> options.add(String.valueOf(entry.key.slot())));
             }
@@ -985,7 +986,7 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
             }
         }
         else if (args.length == 2 && sender instanceof Player player && player.hasPermission(USE)
-            && Set.of("spawn", "open", "direction", "dir", "despawn").contains(args[0].toLowerCase(Locale.ROOT))) {
+            && Set.of("spawn", "b", "open", "direction", "dir", "despawn").contains(args[0].toLowerCase(Locale.ROOT))) {
             if (args[0].equalsIgnoreCase("spawn")) options.addAll(List.of("normal", "pro", "promax"));
             roster.entries.values().stream().filter(entry -> allowed(player, entry)).forEach(entry -> options.add(String.valueOf(entry.key.slot())));
         }

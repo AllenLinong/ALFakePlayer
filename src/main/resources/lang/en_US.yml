@@ -1,4 +1,4 @@
-config-version: 10
+config-version: 11
 benchmark-help: '&eUsage: /afp benchmark spawn <count> (1–%max%); /afp benchmark stop to clear.'
 benchmark-spawned: '&aShowing %count% virtual test players in the TAB list.'
 benchmark-stopped: '&aRemoved %count% virtual test players from the TAB list.'
@@ -31,7 +31,7 @@ command-help:
     - '&b%command% despawn [slot] &8- &7Recall a dummy without deleting its inventory or settings'
     - '&b%command% spawn [slot] [normal|pro|promax] &8- &7Choose a tier; omitted tier reuses the last one'
     - '&b%command% spawnpro [slot] / spawnpromax [slot] &8- &7Summon Pro / Pro Max directly'
-    - '&b%command% <slot> &8- &7Open inventory; also open <slot>'
+    - '&b%command% b <slot> &8- &7Open the fake player inventory'
     - '&b%command% list &8- &7List your slots and online status'
     - '&b%command% direction <slot> &8- &7Set work direction; alias: dir'
     - '&b%command% rename <slot> <new name> &8- &7Use one Fake Player Rename Card'
