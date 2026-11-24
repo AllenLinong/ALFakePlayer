@@ -1,0 +1,6 @@
+config-version: 3
+states:
+  enabled: '&a已开启'
+  disabled: '&c已关闭'
+  summoned: '&a已召唤'
+  not-summoned: '&7未召唤'

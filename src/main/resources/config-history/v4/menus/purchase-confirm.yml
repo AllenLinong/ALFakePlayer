@@ -1,0 +1,12 @@
+config-version: 4
+purchase-confirm:
+  title: '&0购买假人'
+  shape: ['#########', '##C###Y##', '#########']
+  items:
+    '#': {type: GRAY_STAINED_GLASS_PANE, name: ' ', action: none}
+    C: {type: BARRIER, name: '&c返回', action: cancel}
+    Y:
+      type: EMERALD
+      name: '&a确认购买'
+      lore: ['&7购买后在主菜单新增一个假人，不会立即召唤。']
+      action: confirm

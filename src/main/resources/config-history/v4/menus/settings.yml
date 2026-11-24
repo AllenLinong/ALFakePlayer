@@ -1,0 +1,88 @@
+config-version: 4
+settings:
+  title: '&0行为设置 &8· &0%name%'
+  shape:
+    - '#########'
+    - '#M#A#U#C#'
+    - '##P#D#S##'
+    - 'R########'
+  items:
+    '#':
+      type: GRAY_STAINED_GLASS_PANE
+      name: ' '
+    M:
+      type: IRON_PICKAXE
+      name: '&e&l挖掘'
+      lore:
+        - '&6▶ &8挖掘设置'
+        - '&e▸ &7当前状态: %state%'
+        - '&e▸ &7先挖正前方上格，再挖它正下方一格'
+        - '&e▸ &7快捷栏有方块时，只挖同类方块'
+        - '&e▸ &7自动匹配工具和采集等级，不匹配就暂停'
+        - ''
+        - '&6▶ &8操作'
+        - '&7• &a鼠标左键 &a➤ &f开启或关闭'
+      action: 'toggle:mine'
+    A:
+      type: IRON_SWORD
+      name: '&c&l攻击'
+      lore:
+        - '&6▶ &8攻击设置'
+        - '&c▸ &7当前状态: %state%'
+        - '&c▸ &7攻击间隔: &f%attack_interval% tick &8（默认/最短 20）'
+        - '&c▸ &7武器冷却结束后攻击前方目标'
+        - ''
+        - '&6▶ &8操作'
+        - '&7• &a鼠标左键 &a➤ &f开启或关闭'
+        - '&7• &a鼠标右键 &a➤ &f输入攻击间隔'
+        - '&7• &aShift+左键/-20，Shift+右键/+20 tick'
+      action: 'toggle:attack'
+    U:
+      type: GRASS_BLOCK
+      name: '&a&l放置'
+      lore:
+        - '&6▶ &8放置设置'
+        - '&a▸ &7当前状态: %state%'
+        - '&a▸ &7当前方块: &f%placement_block%'
+        - '&a▸ &7请在背包第 5 行设定放置方块'
+        - ''
+        - '&6▶ &8操作'
+        - '&7• &a鼠标左键 &a➤ &f开启或关闭'
+      action: 'toggle:use'
+    C:
+      type: CHEST
+      name: '&6&l搬运货物'
+      lore:
+        - '&7当前状态: %state%'
+        - '&7开启后，将主背包货物搬到相邻箱子'
+        - '&7保留快捷栏、副手和装备'
+        - '&a左键 &7开启或关闭'
+      action: 'toggle:unload'
+    D:
+      type: COMPASS
+      name: '&b&l工作方向'
+      lore:
+        - '&a左键 &7关闭菜单，然后朝目标方向挥手一次'
+        - '&7只记录水平方向，设好后自动返回'
+      action: 'direction'
+    P:
+      type: PISTON
+      name: '&b&l允许被推动'
+      lore:
+        - '&7当前状态: %state%'
+        - '&a左键 &7切换实体碰撞推动'
+      action: 'toggle:pushable'
+    S:
+      type: LEATHER_BOOTS
+      name: '&b&l保持蹲姿'
+      lore:
+        - '&7当前状态: %state%'
+        - '&a左键 &7切换蹲下或站立'
+      action: 'toggle:sneak'
+    R:
+      type: ARROW
+      name: '&a&l返回背包'
+      lore:
+        - '&6▶ &8操作'
+        - '&7• &a鼠标左键 &a➤ &f返回背包'
+      action: 'open_gui:inventory'

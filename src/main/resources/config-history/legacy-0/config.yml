@@ -1,0 +1,35 @@
+slots:
+  default: 1
+  max-per-owner: 10
+  max-active-server: 20
+
+luckperms:
+  group: 'default'
+
+economy:
+  enabled: false
+  summon-price: 100.0
+
+teleport:
+  to-dummy-delay-seconds: 5
+  to-dummy-cooldown-seconds: 5
+
+performance:
+  simulation-distance: 2
+  view-distance: 2
+  idle-target-interval-ticks: 3
+  idle-target-max-ticks: 20
+  use-interval-ticks: 4
+  save-interval-ticks: 200
+
+unloading:
+  enabled: true
+  interval-ticks: 40
+  max-retry-ticks: 160
+
+survival:
+  auto-eat-at-food-level: 2
+  minimum-tool-durability: 5
+  # 设为 0 时，静止不动的假人不会因站着而掉饱食度。
+  passive-exhaustion-per-second: 0.1
+  lethal-starvation-any-non-peaceful-difficulty: true

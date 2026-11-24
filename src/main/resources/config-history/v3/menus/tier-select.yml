@@ -1,0 +1,35 @@
+config-version: 3
+tier-select:
+  title: '&0选择假人等级'
+  shape:
+    - '#########'
+    - '###N#####'
+    - '##P#X#C##'
+  items:
+    '#':
+      type: GRAY_STAINED_GLASS_PANE
+      name: ' '
+      action: 'none'
+    N:
+      type: ZOMBIE_HEAD
+      name: '&a普通假人'
+      lore:
+        - '&7选择后还会显示费用并再次确认'
+      action: 'tier:normal'
+    P:
+      type: PLAYER_HEAD
+      name: '&bPro 假人'
+      lore:
+        - '&7选择后还会显示费用并再次确认'
+      action: 'tier:pro'
+    X:
+      type: DRAGON_HEAD
+      name: '&6Pro Max 假人'
+      lore:
+        - '&7选择后还会显示费用并再次确认'
+      action: 'tier:promax'
+    C:
+      type: BARRIER
+      name: '&c取消'
+      lore: []
+      action: 'cancel'

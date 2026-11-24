@@ -1,0 +1,64 @@
+config-version: 5
+main:
+  title: '&0我的假人 &8· &0第 %page% 页'
+  shape:
+    - '####T####'
+    - '#AAAAAAA#'
+    - 'N###X#G#P'
+  items:
+    '#':
+      type: GRAY_STAINED_GLASS_PANE
+      name: ' '
+      action: 'none'
+    T:
+      type: BOOK
+      name: '&b&l我的假人'
+      lore:
+        - '&6▶ &8假人管理'
+        - '&a▸&7购买后，假人会出现在此列表'
+      action: 'none'
+    A:
+      type: PLAYER_HEAD
+      name: '&e%name% &8(#%slot%)'
+      lore:
+        - '&6▶ &8假人信息'
+        - '&a▸&7档位：&f%tier%'
+        - '&a▸&7状态：%status%'
+        - ''
+        - '&6▶ &8操作'
+        - '&7•&a鼠标左键&a➤&f选择档位，或确认召回'
+        - '&7•&e鼠标右键&a➤&f传送到假人身边'
+        - '&7•&bShift+右键&a➤&f打开假人背包'
+      action: 'dummy'
+    N:
+      type: ARROW
+      name: '&e上一页'
+      lore:
+        - '&6▶ &8操作'
+        - '&7•&a鼠标左键&a➤&f上一页'
+      action: 'page:previous'
+    X:
+      type: PAPER
+      name: '&7第 %page% 页'
+      lore:
+        - '&6▶ &8页码'
+        - '&a▸&7当前第 &f%page% &7页'
+      action: 'none'
+    G:
+      type: CHEST
+      name: '&a&l购买假人'
+      lore:
+        - '&6▶ &8购买信息'
+        - '&a▸&7购买后新增一个未召唤的假人'
+        - '%purchase_cost%'
+        - ''
+        - '&6▶ &8操作'
+        - '&7•&a鼠标左键&a➤&f查看并确认购买'
+      action: 'new_dummy'
+    P:
+      type: ARROW
+      name: '&e下一页'
+      lore:
+        - '&6▶ &8操作'
+        - '&7•&a鼠标左键&a➤&f下一页'
+      action: 'page:next'

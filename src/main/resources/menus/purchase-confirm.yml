@@ -1,0 +1,24 @@
+config-version: 5
+purchase-confirm:
+  title: '&0购买假人'
+  shape: ['#########', '##C###Y##', '#########']
+  items:
+    '#': {type: GRAY_STAINED_GLASS_PANE, name: ' ', action: none}
+    C:
+      type: BARRIER
+      name: '&c返回'
+      lore:
+        - '&6▶ &8操作'
+        - '&7•&a鼠标左键&a➤&f取消并返回假人列表'
+      action: cancel
+    Y:
+      type: EMERALD
+      name: '&a确认购买'
+      lore:
+        - '&6▶ &8购买信息'
+        - '&a▸&7购买后不会立即召唤'
+        - '%purchase_cost%'
+        - ''
+        - '&6▶ &8操作'
+        - '&7•&a鼠标左键&a➤&f确认购买'
+      action: confirm

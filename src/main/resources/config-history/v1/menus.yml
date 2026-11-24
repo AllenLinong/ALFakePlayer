@@ -1,0 +1,96 @@
+config-version: 1
+states:
+  enabled: '&a已开启'
+  disabled: '&c已关闭'
+inventory:
+  title: '&0假人背包 &8· &0%name%'
+  shape:
+    - 'BBBBBBBBB'
+    - 'BBBBBBBBB'
+    - 'BBBBBBBBB'
+    - 'XXXXXXXXX'
+    - 'FEEEE#P#S'
+    - 'HHHHHHHHH'
+  items:
+    X:
+      type: BLACK_STAINED_GLASS_PANE
+      name: ' '
+    '#':
+      type: GRAY_STAINED_GLASS_PANE
+      name: ' '
+    P:
+      type: BRICKS
+      name: '&6&l放置方块'
+      lore:
+        - '&6▶ &8方块筛选'
+        - '&6▸ &7当前方块: &f%placement_block%'
+        - '&6▸ &7缺货时暂停，不使用其他方块'
+        - ''
+        - '&6▶ &8操作'
+        - '&7• &a拿着方块左键 &a➤ &f设定方块（不消耗）'
+        - '&7• &a鼠标右键 &a➤ &f清除筛选'
+      action: 'select:placement'
+    S:
+      type: COMPARATOR
+      name: '&a&l行为设置'
+      lore:
+        - '&6▶ &8行为管理'
+        - '&a▸ &7管理挖掘、攻击与放置'
+        - ''
+        - '&6▶ &8操作'
+        - '&7• &a鼠标左键 &a➤ &f打开行为设置'
+      action: 'open_gui:settings'
+
+settings:
+  title: '&0行为设置 &8· &0%name%'
+  shape:
+    - '#########'
+    - '##M#A#U##'
+    - 'R########'
+  items:
+    '#':
+      type: GRAY_STAINED_GLASS_PANE
+      name: ' '
+    M:
+      type: IRON_PICKAXE
+      name: '&e&l挖掘'
+      lore:
+        - '&6▶ &8挖掘设置'
+        - '&e▸ &7当前状态: %state%'
+        - '&e▸ &7先挖正前方上格，再挖它正下方一格'
+        - '&e▸ &7快捷栏有方块时，只挖同类方块'
+        - '&e▸ &7自动匹配工具和采集等级，不匹配就暂停'
+        - ''
+        - '&6▶ &8操作'
+        - '&7• &a鼠标左键 &a➤ &f开启或关闭'
+      action: 'toggle:mine'
+    A:
+      type: IRON_SWORD
+      name: '&c&l攻击'
+      lore:
+        - '&6▶ &8攻击设置'
+        - '&c▸ &7当前状态: %state%'
+        - '&c▸ &7武器冷却结束后攻击前方目标'
+        - ''
+        - '&6▶ &8操作'
+        - '&7• &a鼠标左键 &a➤ &f开启或关闭'
+      action: 'toggle:attack'
+    U:
+      type: GRASS_BLOCK
+      name: '&a&l放置'
+      lore:
+        - '&6▶ &8放置设置'
+        - '&a▸ &7当前状态: %state%'
+        - '&a▸ &7当前方块: &f%placement_block%'
+        - '&a▸ &7请在背包第 5 行设定放置方块'
+        - ''
+        - '&6▶ &8操作'
+        - '&7• &a鼠标左键 &a➤ &f开启或关闭'
+      action: 'toggle:use'
+    R:
+      type: ARROW
+      name: '&a&l返回背包'
+      lore:
+        - '&6▶ &8操作'
+        - '&7• &a鼠标左键 &a➤ &f返回背包'
+      action: 'open_gui:inventory'

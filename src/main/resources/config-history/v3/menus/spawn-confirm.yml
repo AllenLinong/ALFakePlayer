@@ -1,0 +1,31 @@
+config-version: 3
+spawn-confirm:
+  title: '&0召唤确认 &8· &0%name%'
+  shape:
+    - '#########'
+    - '###I#####'
+    - '##C###Y##'
+  items:
+    '#':
+      type: GRAY_STAINED_GLASS_PANE
+      name: ' '
+      action: 'none'
+    I:
+      type: PAPER
+      name: '&e召唤信息'
+      lore:
+        - '&7等级: &f%tier%'
+        - '&7费用: &6%price%'
+        - '&7召唤在你当前位置；经济关闭时不收费。'
+      action: 'none'
+    C:
+      type: BARRIER
+      name: '&c取消'
+      lore: []
+      action: 'cancel'
+    Y:
+      type: EMERALD_BLOCK
+      name: '&a确认召唤'
+      lore:
+        - '&7确认后开始召唤并按配置扣费'
+      action: 'confirm'

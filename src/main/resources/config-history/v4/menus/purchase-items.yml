@@ -1,0 +1,8 @@
+config-version: 4
+purchase-items:
+  title: '&0设置购买物品 · 左键复制 / 右键清空'
+  shape: ['#########', '###AAA###', '####B####']
+  items:
+    '#': {type: GRAY_STAINED_GLASS_PANE, name: ' ', action: none}
+    A: {type: PAPER, name: ' ', action: purchase_sample}
+    B: {type: EMERALD, name: '&a保存并关闭', action: save_purchase_items}

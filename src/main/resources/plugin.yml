@@ -1,0 +1,23 @@
+name: ALFakePlayer
+version: '1.0.0'
+main: io.github.dummyplayers.DummyPlayers
+folia-supported: true
+api-version: '26.1.2'
+softdepend: [LuckPerms, Vault, PlaceholderAPI, PlayerPoints]
+commands:
+  alfakeplayer:
+    description: 管理假人
+    aliases: [afp, fakeplayer, dummy, 假人]
+permissions:
+  alfakeplayer.use:
+    description: 召唤和管理自己的假人
+    default: true
+  alfakeplayer.teleport:
+    description: 在自己与在线假人之间传送（还需要 alfakeplayer.use）
+    default: true
+  alfakeplayer.teleport.bypass:
+    description: 跳过传送到假人的等待和冷却
+    default: op
+  alfakeplayer.admin:
+    description: 从控制台或管理员账号发放假人栏位
+    default: op

@@ -1,0 +1,49 @@
+config-version: 3
+language: zh_CN
+
+slots:
+  default: 1
+  max-per-owner: 10
+  max-active-server: 20
+
+luckperms:
+  group: 'default'
+
+economy:
+  enabled: false
+  # Kept for compatibility with older configurations; tier-prices controls current charges.
+  summon-price: 300.0
+  tier-prices:
+    normal: 300.0
+    pro: 600.0
+    promax: 1000.0
+
+teleport:
+  to-dummy-delay-seconds: 5
+  to-dummy-cooldown-seconds: 5
+
+performance:
+  simulation-distance: 2
+  # Maximum chunk radius sent to a fake player. The promax 10 setting is effectively 9x9.
+  view-distance: 4
+  dummy-chunks:
+    normal: 5
+    pro: 7
+    promax: 10
+  idle-target-interval-ticks: 3
+  idle-target-max-ticks: 20
+  use-interval-ticks: 4
+  save-interval-ticks: 200
+
+unloading:
+  enabled: true
+  interval-ticks: 40
+  max-retry-ticks: 160
+
+survival:
+  ignore-hostile-mobs: true
+  auto-eat-at-food-level: 2
+  minimum-tool-durability: 1
+  # 设为 0 时，静止不动的假人不会因站着而掉饱食度。
+  passive-exhaustion-per-second: 0.1
+  lethal-starvation-any-non-peaceful-difficulty: true

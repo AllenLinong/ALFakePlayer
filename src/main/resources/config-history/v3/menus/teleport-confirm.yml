@@ -1,0 +1,28 @@
+config-version: 3
+teleport-confirm:
+  title: '&0召回确认 &8· &0%name%'
+  shape:
+    - '#########'
+    - '####I####'
+    - '##C###Y##'
+  items:
+    '#':
+      type: GRAY_STAINED_GLASS_PANE
+      name: ' '
+      action: 'none'
+    I:
+      type: PAPER
+      name: '&e召回假人'
+      lore:
+        - '&7确认后会把已召唤的假人传送到你的位置。'
+      action: 'none'
+    C:
+      type: BARRIER
+      name: '&c取消'
+      lore: []
+      action: 'cancel'
+    Y:
+      type: ENDER_PEARL
+      name: '&a确认召回'
+      lore: []
+      action: 'confirm'
