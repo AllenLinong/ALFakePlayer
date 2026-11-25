@@ -1,180 +1,110 @@
 # ALFakePlayer
 
-适用于使用 Java 25 的 Paper 和 Folia 服务端。已验证官方 Folia 26.1.2、26.2、26.3；不支持 Spigot。插件使用真实的服务端玩家实体和原版动作逻辑。后续版本或其他 Folia 分支若变更内部接口，应先在测试服验证。
+适用于 Paper / Folia 的假人插件。玩家可以购买并召唤自己的假人，让它在原地挖矿、打怪、放方块，背包满了自动往箱子里卸货。假人是服务端里真实的玩家实体，行为遵循原版规则；也支持多个子服共用数据，跨服管理和召回假人。
 
-将 `build/libs/ALFakePlayer-1.1.0.jar` 放入 `plugins/` 后重启。首次启动在 `plugins/ALFakePlayer/` 下生成 `config.yml`、`database.yml`、`menus/` 和 `lang/`。在 `config.yml` 中设置 `language: zh_CN`（默认）或 `language: en_US` 切换消息和指令帮助，重启生效。已有的 `messages.yml` 在首次生成中文版时迁移仍适用的自定义消息，旧文件保留。重启后不自动召唤假人。
+## 功能
 
-## 数据存储
+- **购买与召唤**：购买可以要求金币、点券、物品，或几种同时要求。假人分 Normal / Pro / Pro Max 三个等级，加载的区块范围和召唤价格各不相同，都可以配置。
+- **自动工作**：挖掘正前方的方块，自动攻击（可调攻击间隔），放置方块并自动补货，背包满时向相邻箱子卸货，饿了自动进食。
+- **背包与设置**：随时打开假人背包，未召唤或死亡时也能打开；可以设置工作方向、是否会被推动、是否保持蹲下。
+- **传送**：传送到假人身边，或把假人叫到自己身边，可以跨世界。
+- **跨服**：多个子服连接同一个 MySQL，在任意子服都能管理自己的假人、传送过去或召回到当前子服；可选用 Redis 让跨服操作即时生效。
+- **菜单可自定义**：所有菜单的布局和文字都能修改，图标支持资源包 CustomModelData、CraftEngine 和 ItemsAdder 物品。
+- **显示**：假人在 TAB 列表中显示 LuckPerms 前缀和 PlaceholderAPI 称号。
+- **其他**：内置中文和英文；插件更新时配置文件自动升级，自定义内容保留，原文件会备份。
 
-- 数据库设置在 `database.yml`。默认 `type: sqlite`，数据保存在 `plugins/ALFakePlayer/players.db`，使用 Paper/Folia 自带的 SQLite 驱动，单服无需修改。
-- 改为 `type: mysql`（也可用 MariaDB）即可连接远程数据库，跨服必须使用 MySQL。MySQL 驱动由 Paper 自带，连接池 HikariCP 已打包进插件。数据库需提前创建，建议字符集 `utf8mb4`。
-- 所有数据表使用 `database.prefix` 前缀（默认 `afp_`）：`afp_dummies`、`afp_inventory`、`afp_allowances`、`afp_sessions`、`afp_servers`、`afp_purchase_items`、`afp_messages`、`afp_meta`。首次启动自动建表，不需要手动执行 SQL。
-- 从 1.0.x 升级：`players.db` 中的旧表（无前缀）在新表为空时自动导入一次，旧表保留不动。从 SQLite 切换到 MySQL：MySQL 为空时自动导入本服 `players.db` 的数据（包括购买物品），原文件保留。旧开发版的 `players.yml` 不读、不写、不删除。
-- 保存只写入有变化的假人和栏位；在线假人的背包按 `performance.save_interval_ticks` 定时快照并立即排队写入，崩溃时最多丢失一个保存间隔内的变更。
-- 假人仅在召唤时生成实体，不走真人登录流程。直连子服时，服务器列表显示的在线人数包含已召唤且存活的假人；Bukkit 的实际在线名单和玩家容量不变。收回后移除实体和 TAB 条目，背包和设置仍保存在插件数据库中。
-- Velocity 不透传后端状态时，代理入口显示的人数不受此功能影响。
-- 游戏内从内存读取，后台以事务保存有变更的假人和栏位。请在正常停服后备份 `players.db`（MySQL 用常规的数据库备份），不要在服内运行期间手动编辑数据库。
+## 运行环境
 
-## 跨服（多子服）
+- Paper 或 Folia 26.1.2 及以上，Java 25。已在 Folia 26.1.2、26.2、26.3 上验证，不支持 Spigot。
+- 可选插件：
 
-多个子服连接同一个 MySQL 后，玩家可以在任意子服管理自己的假人，并把在其他子服运行的假人召回到身边。
+| 插件 | 用途 |
+| --- | --- |
+| Vault + 任意经济插件 | 用金币购买和召唤 |
+| PlayerPoints | 用点券购买 |
+| LuckPerms | 给假人设置权限组，在 TAB 中显示前缀 |
+| PlaceholderAPI | 在 TAB 中显示称号 |
+| CraftEngine / ItemsAdder | 菜单图标使用自定义物品 |
 
-1. 每个子服的 `config.yml` 设置不同的 `server_id`，必须与 BungeeCord/Velocity 配置中的子服名称一致；`server_name` 仅用于菜单和消息显示。接入跨服前先改好，不要两个子服共用同一个 ID。
-2. 每个子服的 `database.yml` 设置 `type: mysql`，连接同一个数据库并使用相同的 `prefix`。
-3. 推荐同时开启 `redis.enabled`（所有子服使用相同的 `channel`），跨服指令约 0.1–0.2 秒送达；不开 Redis 时通过 MySQL 消息表轮询，延迟约 `sync.poll_interval_millis`（默认 1 秒）加一次往返。
-4. 跨服传送玩家使用代理的 `BungeeCord` 插件消息通道；Velocity 需保持 `bungee-plugin-message-channel = true`（默认开启）。
+## 安装
 
-跨服后的行为：
+1. 把 `ALFakePlayer-1.1.0.jar` 放进 `plugins/`，重启服务器。
+2. 首次启动会在 `plugins/ALFakePlayer/` 下生成 `config.yml`、`database.yml`、`menus/` 和 `lang/`。
+3. 召唤假人默认要扣金币，需要安装 Vault 和经济插件。不想收费的话，在 `config.yml` 中设置 `economy.enabled: false`。
 
-- 主菜单和 `/afp list` 显示假人在哪个子服运行。`/afp tp <编号>` 把玩家送到假人所在子服，到达后传送到假人身边；`/afp tph <编号>` 或主菜单左键把假人召回到本服，保持原档位、不再收费。
-- `/afp despawn`、`delete` 和菜单中的行为设置、工作方向，都可以操作在其他子服运行的假人。`afp clear <服务器ID|all>` 可清除指定子服或全部子服的在线假人。
-- 假人在其他子服运行或正被编辑时，本服的背包界面只读并每 2 秒刷新；对方收回后自动转为可编辑。
-- `/afp items` 设置的购买物品保存在数据库，所有子服共用，保存后立即生效。
-- `afp servers` 查看各子服的在线状态和假人数量。`slots.max_active_server` 按子服分别计算。
-
-数据一致性：同一时间只有一个子服可以运行或编辑某个假人（`afp_sessions` 中的租约）。换服前先保存背包再释放，接手的子服从数据库重新读取，因此不会复制物品。子服崩溃后，它占用的假人要等 `sync.timeout_seconds`（默认 60 秒）没有心跳才能被其他子服接管；如果该子服只是卡顿后恢复，会发现租约已被接管，直接移除本地副本且不保存。
+从 1.0.x 升级时，配置和数据会自动迁移，旧文件备份在 `config-backups/`。
 
 ## 指令
 
-主指令 `/alfakeplayer`，常用缩写 `/afp`。每个功能只有一种写法。玩家权限 `alfakeplayer.use`；管理员权限 `alfakeplayer.admin`，默认为 OP。`/afp help` 只列玩家指令，管理员指令在 `/afp admin help` 中查看，只有管理员可以查看和使用。
+主指令 `/alfakeplayer`，简写 `/afp`。
 
-玩家（游戏内）：
+**玩家**
 
-| 指令 | 效果 |
+| 指令 | 说明 |
 | --- | --- |
-| `/afp` | 打开主菜单：购买、召唤和管理假人 |
-| `/afp spawn [编号] [normal\|pro\|promax]` | 在自己所在位置召唤，默认 1 号；省略等级时沿用该假人上次的等级 |
-| `/afp despawn [编号]` | 收回假人，保留背包和设置，默认 1 号；支持其他子服 |
-| `/afp list` | 查看已解锁栏位和假人状态 |
-| `/afp b <编号>` | 打开假人背包，包括死亡或未召唤状态 |
-| `/afp dir <编号>` | 用自己当前的视角更新假人的工作朝向，不移动假人 |
-| `/afp rename <编号> <名字>` | 改名，消耗一张黑奴改名卡，无须召唤 |
-| `/afp delete <编号>` | 永久删除自己的假人及其背包和设置 |
-| `/afp tp <编号>` | 传送到假人的精确坐标；假人在其他子服时先把玩家送过去 |
-| `/afp tph <编号>` | 把假人传到自己的精确坐标，无等待、无冷却；假人在其他子服时召回到本服，不再收费 |
+| `/afp` | 打开主菜单，购买、召唤和管理假人 |
+| `/afp spawn [编号] [normal\|pro\|promax]` | 在自己的位置召唤假人 |
+| `/afp despawn [编号]` | 收回假人，背包和设置保留 |
+| `/afp list` | 查看自己的假人 |
+| `/afp b <编号>` | 打开假人背包 |
+| `/afp dir <编号>` | 让假人面向自己当前看的方向 |
+| `/afp rename <编号> <名字>` | 给假人改名，消耗一张改名卡 |
+| `/afp delete <编号>` | 永久删除假人和它的背包 |
+| `/afp tp <编号>` | 传送到假人身边 |
+| `/afp tph <编号>` | 把假人传送到自己身边 |
 
-管理员（游戏内或后台）：
+**管理员**（在后台输入时不用加 `/`）
 
-| 指令 | 效果 |
+| 指令 | 说明 |
 | --- | --- |
-| `afp admin help` | 查看管理员指令 |
-| `afp grant <玩家> <数量>` | 给玩家增加假人 |
-| `afp set <玩家> <总数>` | 把玩家的假人补到指定数量，不删除已有假人 |
-| `afp card <在线玩家> [数量]` | 发放黑奴改名卡，默认 1 张，一次最多 64 张 |
-| `/afp items` | 设置购买所需的物品样本（最多三组，仅游戏内），保存在数据库，所有子服共用 |
-| `afp despawn <名字>` | 收回任意玩家的假人，保留存档；支持其他子服 |
-| `afp delete <名字>` | 永久删除任意玩家的假人及存档 |
-| `afp clear [服务器ID\|all]` | 清除本服（默认）、指定子服或全部子服已召唤的假人实体，不掉落物品，保留存档；10 秒内输入两次才执行 |
-| `afp servers` | 查看跨服网络中各子服的在线状态和假人数量 |
-| `afp test <数量>` / `afp test stop` | 在全服 TAB 中显示或清除虚拟测试玩家（1–80 个）；没有实体、区块加载或自动动作，不计入服务器列表在线人数 |
+| `/afp admin help` | 查看管理员指令 |
+| `/afp grant <玩家> <数量>` | 给玩家增加假人 |
+| `/afp set <玩家> <总数>` | 把玩家的假人补到指定数量 |
+| `/afp card <玩家> [数量]` | 发放改名卡 |
+| `/afp items` | 设置购买假人需要的物品（只能在游戏内用） |
+| `/afp despawn <名字>` | 收回任意玩家的假人 |
+| `/afp delete <名字>` | 永久删除任意玩家的假人 |
+| `/afp clear [服务器ID\|all]` | 收回本服、指定子服或全部子服的所有假人（10 秒内输入两次才执行） |
+| `/afp servers` | 查看各子服状态和假人数量 |
+| `/afp test <数量>` / `/afp test stop` | 在 TAB 中添加或清除测试用的虚拟玩家 |
 
-后台输入时不加 `/`。永久删除时背包和行为设置一起删除。普通死亡只移除实体，保留物品和设置。玩家名适用于在线或服务器已知的离线玩家。
+## 权限
 
-新玩家从 `/afp` 购买第一个假人，确认后才会出现假人按钮。购买与召唤是两步，费用分开计算：
+| 权限 | 说明 | 默认 |
+| --- | --- | --- |
+| `alfakeplayer.use` | 购买、召唤和管理自己的假人 | 所有人 |
+| `alfakeplayer.teleport` | 使用 `/afp tp` 和 `/afp tph` | 所有人 |
+| `alfakeplayer.teleport.bypass` | 传送时不用等待，也没有冷却 | OP |
+| `alfakeplayer.admin` | 使用管理员指令 | OP |
 
-- 购买默认 300 金币。`purchase.coins`（金币，需要 Vault）、`purchase.points`（点券，需要 PlayerPoints）和 `/afp items` 设置的物品可以同时要求，例如 300 金币 + 50 点券 + 3 个钻石，玩家必须全部满足才能购买。全部为 0 且没有物品时免费。
-- 扣费顺序：先检查物品，再扣金币，再扣点券（点券失败时退还金币），最后扣物品；任一步失败都不会购买。
-- 购买物品不写在 `config.yml`：管理员在 `/afp items` 界面中拿着物品左键复制、右键清空，保存后写入数据库并立即生效，不会改写配置文件。物品样本保存完整物品信息，不消耗管理员手上的物品。
-- 召唤费用默认开启（`economy.enabled: true`），选择档位后先打开召唤确认菜单。
+## 配置
 
-假人不注册为真人在线玩家，使用 `/afp tp <名字>` 和 `/afp despawn <名字>` 操作。改名后再次召唤使用新原版名牌，不创建全息文字。UUID 不变，实体不会作为地图存档保存。
+| 文件 | 内容 |
+| --- | --- |
+| `config.yml` | 服务器 ID、语言、假人数量上限、购买和召唤价格、等级范围、传送、性能 |
+| `database.yml` | 数据库（默认 SQLite，跨服用 MySQL）和 Redis |
+| `menus/*.yml` | 各个菜单的布局、图标和文字 |
+| `lang/*.yml` | 中文和英文消息 |
 
-## 操作
+每个配置文件里都有详细注释。
 
-- 在「行为设置」中，左键「攻击」开关自动攻击，右键在聊天输入攻击间隔（20–200 tick，默认且最低为 20），Shift+左键减少 20 tick（更快），Shift+右键增加 20 tick（更慢）。攻击仍需等待武器冷却。
-- 「工作方向」会退出菜单；朝目标方向挥一次主手，假人只调整水平朝向，菜单随后重新打开。「搬运货物」开启后会向相邻箱子卸货，仍需启用全局 `unloading.enabled`。可单独设置是否允许被推动和是否保持蹲姿。
-- 使用 `/afp b <编号>` 打开假人背包，点击「行为设置」配置工作。改名使用 `/afp rename <编号> <新名字>`，只消耗玩家自己背包、快捷栏或副手中的插件改名卡，命名牌和普通纸无效。已有昵称保留，改名不影响内部账号和 UUID。
-- 默认背包界面的第 1–3 行为储物格，第 4 行为黑色玻璃板，第 5 行依次为副手、头盔、胸甲、护腿、靴子、灰色玻璃板、放置方块、灰色玻璃板、行为设置，第 6 行为快捷栏 1–9。
-- 假人拾取掉落物时，优先叠入主背包，再用主背包空格；容不下的部分保留原版拾取行为，不移动原有工作工具或副手物品。
-- 拿着样品左键点击「放置方块」以指定方块类型，不消耗样品；空手或拿着物品都可右键清除。开启放置后，1 号快捷栏没有匹配方块时，从快捷栏 2–9 和背包补货，换下的物品放回来源格。未选方块或缺货时暂停放置，不使用副手或其他方块。
-- 放置沿视线点击第一个命中的方块面；挖掘和放置都读取原版方块触及距离（生存默认 4.5 格）。
-- 假人仍会拾取经验球并触发经验修补，但不会积攒经验值或等级。
-- 默认显示名类似 `Moss4k29f`，原有命名牌昵称保留。昵称不注册成真人账号；内部账号名使用 `AFP~` 前缀，与开启用户名校验的 Paper 离线登录区分。假人用服务端生成的 UUID 保存背包和权限，请保持用户名校验开启。
-- Folia 上，跨区可打开在线假人的背包并查看快照；移动物品须回到假人所在的区域。离线假人的背包可远程编辑。跨区调整工作方向由假人所在区域执行。
-- `/afp tp` 和 `/afp tph` 支持跨区域、跨世界，直接使用执行传送时目标的坐标，不偏移、不搜索安全落点。需要 `alfakeplayer.use` 和 `alfakeplayer.teleport`。
-- `/afp tp` 默认等待 5 秒，成功后冷却 5 秒；分别通过 `teleport.to_dummy_delay_seconds` 和 `teleport.to_dummy_cooldown_seconds` 配置（`0` 为关闭），冷却按玩家而非假人计算。`alfakeplayer.teleport.bypass` 默认授予 OP，跳过等待且不检查或产生冷却。`/afp tph` 始终无等待、无冷却，两条命令均不允许同一玩家重复提交尚未完成的传送。
-- 快捷栏第 1 格为工作槽。饱食度剩 1 格时用副手进食；副手旧物优先放入背包空格，其次快捷栏空格，都没有时与食物互换，不掉落物品。
-- 挖掘按原版方块触及距离，从近到远检查正前方一条直线；每列先尝试头部高度，再尝试脚部高度，不挖两侧、不穿过遮挡。快捷栏放有方块时只挖匹配类型，三种耐久的铁砧视为同类。按物品原版挖掘规则匹配工具及采集等级；没有合适的工具就暂停，不使用默认工具兜底。工具剩余耐久不高于 `survival.minimum_tool_durability` 时停用（默认 1），有备用时优先将旧工具收进背包；旧配置若仍为 5，会在剩 5 点时更换。
-- Shift 点击假人的物品格可快速取出，最多移入玩家背包能容纳的数量；跨区查看仍不能移动物品。
-- 主背包 27 格都有物品时，尝试向同高度、水平紧挨一格的箱子卸货。不移动快捷栏、装备栏和副手。若箱子不可打开或装不下，则保留无法转移的物品。建议按实际领地插件验证权限拦截行为。
-
-## 管理配置
-
-CraftEngine 26.9.2 可直接使用原版 JAR。ALFakePlayer 会对假人死亡跳过 CraftEngine 的实体死亡掉落监听器，避免无客户端会话导致的空指针；假人死亡和背包保留照常处理，真人和普通怪物的掉落仍交给 CraftEngine。
-
-菜单布局与文案在 `menus/` 下分别编辑：`main.yml`（主菜单）、`tier_select.yml`（等级选择）、`spawn_confirm.yml`（召唤确认）、`teleport_confirm.yml`（召回确认）、`purchase_confirm.yml`（购买确认）、`purchase_items.yml`（设置购买物品）、`inventory.yml`（背包）、`settings.yml`（行为设置）；`states.yml` 存放公共状态文案。旧版 `menus.yml` 和旧的连字符文件名（例如 `tier-select.yml`）会在升级时自动改名并备份。
-
-菜单图标除了原版物品，还支持资源包和自定义物品插件（写法见各菜单文件开头的说明）：
+菜单图标的写法：
 
 ```yaml
-X:
-  type: PAPER                          # 原版物品；使用自定义物品时作为备用外观
-  custom_model_data: 10001             # 资源包 CustomModelData
-  craftengine: "namespace:item_id"     # CraftEngine 自定义物品
-  itemsadder: "namespace:item_id"      # ItemsAdder 自定义物品
-  # 兼容写法：plugin_item: "ce:namespace:item_id" / "ia:namespace:item_id"
+type: DIAMOND                       # 原版物品
+custom_model_data: 10001            # 资源包模型
+craftengine: "namespace:item_id"    # CraftEngine 物品
+itemsadder: "namespace:item_id"     # ItemsAdder 物品
+# 也可以写成 type: "ce:namespace:item_id" 或 type: "ia:namespace:item_id"
 ```
 
-对应插件未安装或找不到物品时显示 `type`，并在日志中提示一次。主菜单的翻页按钮显示 `%current_page%/%total_pages%`。
+找不到自定义物品时显示 `type` 中的原版物品。
 
-背包菜单无法显示原版背包里的盔甲、盾牌轮廓（客户端只在玩家自己的背包界面绘制），`inventory.yml` 的 `empty_slots` 为头盔、胸甲、护腿、靴子和副手设置空格占位图标：格子为空时显示，拿着物品点击即可放入，占位图标本身拿不走。默认是浅灰色玻璃板；配合资源包，可以用上面的自定义物品写法做成和原版一样的轮廓。
+## 跨服设置
 
-所有配置文件的键名和菜单文件名统一使用下划线（例如 `max_per_owner`、`config_version`、`tier_select.yml`），旧版的连字符写法会在升级时自动转换，原值保留。`config.yml`、`menus/` 的各文件和 `lang/` 的中英文配置各有独立的 `config_version`。启动时，无版本和旧版本配置会自动补入新键，并更新可识别的旧默认值；自定义值和无法确认来源的值保留。升级写盘前在 `plugins/ALFakePlayer/config-backups/` 备份原文件。同版本不重写；无效的 YAML、无法使用的菜单布局和超出当前插件支持的配置版本不会被覆盖，插件会在日志中提示并停止启动。旧 `messages.yml` 只在中文版缺失时导入，原文件不改动。
+1. 每个子服在 `config.yml` 中设置不同的 `server_id`，要和 BungeeCord / Velocity 配置里的子服名一致。
+2. 每个子服在 `database.yml` 中设置 `type: mysql`，连接同一个数据库，`prefix` 保持一致。
+3. 推荐所有子服开启 `redis.enabled`，并使用相同的 `channel`，这样跨服操作即时生效；不开 Redis 也能用，大约延迟 1 秒。
+4. Velocity 需要保持 `bungee-plugin-message-channel = true`（默认就是开启的）。
 
-开发时，更改默认值应先将原版模板保存在 `src/main/resources/config-history/v<旧版本>/`（保持相对路径），再递增受影响文件的 `config_version`，无需更新其他文件的版本号。
-
-```yaml
-luckperms:
-  group: 'lv1'
-economy:
-  enabled: true
-  summon_price: 300.0 # 旧版单一价格，仅用于升级时保留普通等级价格
-  tier_prices:
-    normal: 300.0
-    pro: 600.0
-    promax: 1000.0
-performance:
-  view_distance: 4 # 假人视距半径上限
-  dummy_chunks:
-    normal: 5
-    pro: 7
-    promax: 10
-```
-
-- 召唤收费默认开启，需要 Vault 及其已注册的经济插件；没有经济服务时无法召唤，启动日志会提示，不需要收费请设 `economy.enabled: false`。每次成功召唤都收费，包括死亡后重新召唤；跨服召回不收费。余额不足或服务不可用时拒绝召唤；扣款后召唤异常会尝试原路退款，失败则记录管理员补退所需的 UUID 和金额。
-- 新玩家默认不拥有假人。`slots` 控制假人数量上限，`performance` 控制单假人区块距离与动作检查间隔。假人不建立真实网络连接。
-- `survival.ignore_hostile_mobs` 默认为 `true`：假人仍参与自然刷怪，但敌对怪物不会锁定它；可识别的怪物近战和弹射物伤害会被拦截。饥饿、窒息等环境伤害和真人攻击不受影响。设为 `false` 可恢复怪物攻击行为。
-- `performance.affects_spawning`（默认 `true`）控制假人是否像真人一样让周围自然生成生物。假人多、又不需要刷怪塔时设为 `false` 可明显减轻刷怪和实体负载。
-- 普通假人附近，如果蝙蝠的自然刷怪范围内只有假人而没有参与刷怪的真人，则阻止该次蝙蝠生成。其他生物、已有蝙蝠和非自然生成不受影响。
-- 无法找到工作目标或匹配工具时，扫描逐步放慢到 `performance.idle_target_max_ticks`；有货物但无法卸货时，重试逐步放慢到 `unloading.max_retry_ticks`。改方向、切换任务或通过菜单更换物品会立即唤醒检查。
-- 默认等级范围为 Normal 5×5、Pro 7×7、Pro Max 配置 10（对称玩家视距实际取整为 9×9）；对应价格默认 300/600/1000，可分别在 `economy.tier_prices` 和 `performance.dummy_chunks` 调整。`performance.view_distance` 是半径上限，默认 4；服务器原本视距、区块加载器及 Folia 区域负载仍会影响实际运行。在线上限默认 20，不代表所有机器和地图都能承载该数量。
-
-### 本地性能基线
-
-Folia 26.3 隔离平坦世界，假人开启挖掘但前方无目标；每档稳定后取约 5 秒样本。分散场景的相邻假人相距 768 格。区块数为整个测试主世界的加载数，MSPT 为该档最忙采样区域的平均值。
-
-| 在线假人 | 集中区块数 | 集中 MSPT | 分散区块数 | 分散 MSPT |
-| --- | ---: | ---: | ---: | ---: |
-| 1 | 961 | 1.04 | 961 | 1.09 |
-| 5 | 961 | 0.81 | 4,805 | 0.99 |
-| 10 | 961 | 1.25 | 9,610 | 3.12 |
-| 20 | 961 | 1.20 | 19,220 | 2.43 |
-
-这是空转场景的短测，不是正式服容量承诺。首次开服可将 `slots.max_active_server` 设为 5–10，等真实地图、持续工作和其他插件一起验证后再提高。
-- 假人的 TAB 条目显示 LuckPerms 前缀、当前昵称，以及 PlaceholderAPI 能为该假人解析出的 `%playerTitle_use%` 称号；称号不可用时省略。头顶只保留插件名牌，不显示内部账号名。Velocity 的 TAB 插件继续管理真人的显示规则；假人不是代理上的真实连接，跨子服列表不会自动加入假人。建议勿给假人组配置管理权限或领地绕过权限。
-
-### 从 1.0.x 升级
-
-- 配置文件自动升级并备份到 `config-backups/`。旧的 `purchase.mode` 换算为新的金币/点券价格；旧模式为 `items` 时，原有的 `purchase.items` 在首次启动时移入数据库，之后以数据库为准。
-- `economy.enabled` 若仍是旧默认值 `false`，升级后变为新默认值 `true`（召唤收费）。没有安装 Vault 经济插件的服务器请改回 `false`，否则无法召唤。
-- `players.db` 中的旧数据自动导入新表，见「数据存储」。
-
-## 构建
-
-首次运行 Paper 26.1.2 服务端后，使用 Java 25 和 Gradle 执行（HikariCP 会被重定位后打包进 JAR）：
-
-```powershell
-gradle '-PpaperHome=D:\path\to\paper-server' build
-```
-
-生成 `build/libs/ALFakePlayer-1.1.0.jar`。
+同一个假人同一时间只会在一个子服运行，换服不会复制物品。
