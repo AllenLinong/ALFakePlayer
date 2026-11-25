@@ -213,6 +213,10 @@ final class ConfigUpgrade {
         return true;
     }
 
+    /**
+     * 旧版本的默认配置，用于区分玩家改过的值和未改动的默认值（未改动的会换成新默认值）。
+     * 提高某个文件的 config_version 时，把旧版本文件原样放到 config-history/v旧版本号/ 下。
+     */
     private List<YamlConfiguration> history(String name, int version) throws Exception {
         List<YamlConfiguration> history = new ArrayList<>();
         if (version == 0) {

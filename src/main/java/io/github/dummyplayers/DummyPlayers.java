@@ -17,10 +17,10 @@ import org.bukkit.command.*;
 import org.bukkit.configuration.file.YamlConfiguration;
 import org.bukkit.craftbukkit.CraftServer;
 import org.bukkit.craftbukkit.CraftWorld;
+import org.bukkit.craftbukkit.entity.CraftEntityType;
 import org.bukkit.craftbukkit.entity.CraftItem;
 import org.bukkit.craftbukkit.entity.CraftPlayer;
 import org.bukkit.entity.Enemy;
-import org.bukkit.entity.EntityType;
 import org.bukkit.entity.Player;
 import org.bukkit.entity.Projectile;
 import org.bukkit.event.*;
@@ -64,7 +64,8 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
     private Database database;
     private final DummyTeleport teleports = new DummyTeleport(this);
     private final TabBenchmark benchmark = new TabBenchmark(this);
-    private final EnumMap<DummyTier, Integer> tierViewDistances = new EnumMap<>(DummyTier.class);
+    /** 各档位的运行半径（区块），即假人的模拟距离。 */
+    private final EnumMap<DummyTier, Integer> tierRadius = new EnumMap<>(DummyTier.class);
     private final EnumMap<DummyTier, Double> tierPrices = new EnumMap<>(DummyTier.class);
     private Groups groups = Groups.NONE;
     private DummyNames names;
@@ -72,12 +73,12 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
     private FoliaBridge folia;
     private YamlConfiguration messages;
     String serverId = "server", serverName = "server";
-    private int maxActive, baseSlots, maxSlots, simulationDistance, viewDistance, saveInterval;
+    private int maxActive, baseSlots, maxSlots, saveInterval;
     int targetInterval, idleMaxInterval, useInterval, eatLevel, minimumDurability, unloadInterval, unloadMaxInterval;
     float passiveExhaustion;
     boolean lethalStarvation, unloadChests;
     Set<Material> foodBlacklist = Set.of();
-    private boolean ignoreHostileMobs, affectsSpawning;
+    private boolean ignoreHostileMobs, affectsSpawning, passiveSpawnsNeedPlayer;
     private boolean paidSummoning;
     private volatile boolean shuttingDown;
 
@@ -142,12 +143,10 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
                 throw new IllegalArgumentException("config.yml: purchase.coins and purchase.points must be zero or positive");
             }
             maxActive = option("slots.max_active_server", 20, 1, 200);
-            viewDistance = option("performance.view_distance", 4, 2, 10);
-            simulationDistance = option("performance.simulation_distance", 2, 2, viewDistance);
             double legacyPrice = getConfig().getDouble("economy.summon_price", 300.0);
             for (DummyTier tier : DummyTier.values()) {
-                int chunks = option("performance.dummy_chunks." + tier.key, tier.defaultChunkSize, 5, 10);
-                tierViewDistances.put(tier, Math.clamp((chunks - 1) / 2, 2, viewDistance));
+                int chunks = option("performance.dummy_chunks." + tier.key, tier.defaultChunkSize, 3, 9);
+                tierRadius.put(tier, (chunks - 1) / 2);
                 double price = getConfig().getDouble("economy.tier_prices." + tier.key, legacyPrice);
                 if (!Double.isFinite(price) || price < 0) {
                     throw new IllegalArgumentException("economy.tier_prices." + tier.key + " must be a finite non-negative number");
@@ -159,6 +158,7 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
             useInterval = option("performance.use_interval_ticks", 4, 4, 100);
             saveInterval = option("performance.save_interval_ticks", 200, 40, 12000);
             affectsSpawning = getConfig().getBoolean("performance.affects_spawning", true);
+            passiveSpawnsNeedPlayer = getConfig().getBoolean("performance.passive_spawns_need_real_player", true);
             eatLevel = option("survival.auto_eat_at_food_level", 2, 0, 19);
             minimumDurability = option("survival.minimum_tool_durability", 1, 1, 1000);
             foodBlacklist = readFoodBlacklist(getConfig().getStringList("survival.food_blacklist"));
@@ -565,7 +565,7 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
         roster.save();
         msg(player, "spawned", "name", entry.name(), "slot", entry.key.slot(),
             "tier", messages.getString("tier_name." + tier.key, tier.key),
-            "chunks", tierViewDistances.get(tier) * 2 + 1);
+            "chunks", tierRadius.get(tier) * 2 + 1);
         if (fee != null) msg(player, "economy_paid", "price", cost);
         return true;
     }
@@ -604,10 +604,13 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
             Player player = dummy.getBukkitEntity();
             player.setPersistent(false);
             player.setAffectsSpawning(affectsSpawning);
-            int dummyViewDistance = tierViewDistances.getOrDefault(entry.tier, 2);
-            player.setViewDistance(dummyViewDistance);
-            player.setSimulationDistance(Math.min(simulationDistance, dummyViewDistance));
-            player.setSendViewDistance(dummyViewDistance);
+            // 档位决定模拟距离（实际运行的范围）。Paper 不接受低于 2 的视距，且模拟距离不能超过视距，
+            // 所以视距取 max(2, 运行半径)；视距只多加载一圈不运行的区块，假人没有客户端，不发送区块
+            int radius = tierRadius.getOrDefault(entry.tier, 1);
+            int viewDistance = Math.max(2, radius);
+            player.setViewDistance(viewDistance);
+            player.setSimulationDistance(radius);
+            player.setSendViewDistance(viewDistance);
             synchronized (roster) { player.getInventory().setContents(entry.items.clone()); }
             dummy.prepareForWorld(server);
             dummy.setGameMode(GameType.SURVIVAL);
@@ -934,14 +937,20 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
         }
     }
 
+    /**
+     * 附近只有假人、没有真人时，取消动物、鱼、蝙蝠等非敌对生物的自然生成。
+     * 敌对生物不受影响，刷怪塔照常出怪；距离按该类生物的原版消失距离判断（鱼 64 格，其余 128 格）。
+     */
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
-    public void onNaturalBatSpawn(PreCreatureSpawnEvent event) {
-        if (event.getType() != EntityType.BAT || event.getReason() != CreatureSpawnEvent.SpawnReason.NATURAL || live.isEmpty()) return;
+    public void onNaturalPassiveSpawn(PreCreatureSpawnEvent event) {
+        if (!passiveSpawnsNeedPlayer || event.getReason() != CreatureSpawnEvent.SpawnReason.NATURAL || live.isEmpty()) return;
+        MobCategory category = CraftEntityType.bukkitToMinecraft(event.getType()).getCategory();
+        if (!category.isFriendly()) return;
         Location position = event.getSpawnLocation();
         if (!(position.getWorld() instanceof CraftWorld world)) return;
         var level = world.getHandle();
         double x = position.getBlockX() + 0.5, y = position.getBlockY(), z = position.getBlockZ() + 0.5;
-        double radius = MobCategory.AMBIENT.getDespawnDistance();
+        double radius = category.getDespawnDistance();
         if (level.getNearestPlayer(x, y, z, radius, player -> player instanceof NativeDummy && !player.isSpectator()) == null) return;
         if (level.getNearestPlayer(x, y, z, radius, player -> !(player instanceof NativeDummy)
             && !player.isSpectator() && player instanceof net.minecraft.world.entity.player.Player real && real.affectsSpawning) == null) {

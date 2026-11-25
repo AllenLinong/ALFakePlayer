@@ -1,6 +1,0 @@
-config-version: 9
-benchmark-help: '&eRun /afp benchmark spawn in game; use /afp benchmark stop to clean up.'
-benchmark-running: '&cA benchmark is already active. Run /afp benchmark stop first.'
-benchmark-started: '&eGradually spawning up to 50 invulnerable Pro Max benchmark dummies at random in your current world.'
-benchmark-spawned: '&aFinished spawning %count% / 50 benchmark dummies. A shortage of safe spots may reduce the total.'
-benchmark-stopped: '&aSpawn queue stopped; %count% benchmark dummies queued for removal.'

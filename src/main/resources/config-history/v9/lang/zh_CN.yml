@@ -1,6 +1,0 @@
-config-version: 9
-benchmark-help: '&e请在游戏内执行 /afp benchmark spawn；清理用 /afp benchmark stop。'
-benchmark-running: '&c已有压测在运行，请先执行 /afp benchmark stop。'
-benchmark-started: '&e开始在当前世界随机分批召唤，目标为 50 个无敌的 Pro Max 测试假人。'
-benchmark-spawned: '&a随机召唤结束：已生成 %count% / 50 个测试假人。安全落点不足时可能少于 50 个。'
-benchmark-stopped: '&a已停止生成，并安排清理 %count% 个压测假人。'

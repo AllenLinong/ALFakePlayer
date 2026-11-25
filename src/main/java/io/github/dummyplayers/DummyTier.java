@@ -1,9 +1,9 @@
 package io.github.dummyplayers;
 
 enum DummyTier {
-    NORMAL("normal", 5),
-    PRO("pro", 7),
-    PROMAX("promax", 10);
+    NORMAL("normal", 3),
+    PRO("pro", 5),
+    PROMAX("promax", 7);
 
     final String key;
     final int defaultChunkSize;
