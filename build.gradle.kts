@@ -3,7 +3,7 @@ plugins {
     id("com.gradleup.shadow") version "9.6.1"
 }
 group = "io.github.dummyplayers"
-version = "1.1.0"
+version = "1.0.0"
 repositories { mavenCentral() }
 val paperHome = providers.gradleProperty("paperHome").orElse(providers.environmentVariable("PAPER_HOME"))
 dependencies {

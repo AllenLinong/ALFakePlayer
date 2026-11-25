@@ -32,7 +32,7 @@ final class Roster {
         };
         final Key key;
         final UUID id;
-        private final String legacyProfile, profile, defaultName;
+        private final String profile, defaultName;
         final ItemStack[] items = new ItemStack[41];
         final AtomicInteger workRevision = new AtomicInteger();
         volatile long inventoryRevision;
@@ -52,7 +52,6 @@ final class Roster {
             this.key = key;
             this.id = id;
             String token = id.toString().replace("-", "").substring(0, 12);
-            legacyProfile = "AFP_" + token;
             profile = "AFP~" + token;
             defaultName = defaultName(id);
         }
@@ -66,7 +65,7 @@ final class Roster {
         String nativeName() { return name().matches("[A-Za-z0-9_]{1,16}") ? name() : defaultName; }
         String name() { return alias.isBlank() ? defaultName : alias; }
         boolean matchesName(String name) {
-            return this.name().equalsIgnoreCase(name) || profile.equalsIgnoreCase(name) || legacyProfile.equalsIgnoreCase(name);
+            return this.name().equalsIgnoreCase(name) || profile.equalsIgnoreCase(name);
         }
         void wakeWork() { workRevision.incrementAndGet(); }
     }
@@ -755,22 +754,9 @@ final class Roster {
 
     // ── 购买所需物品 ──────────────────────────────────────
 
-    /**
-     * 启动时读取购买物品。旧版写在 config.yml 的 purchase.items 只导入一次，
-     * 之后以数据库为准（跨服时所有子服共用），不再改写配置文件。
-     */
-    List<ItemStack> loadPurchaseItems(List<ItemStack> legacy) throws SQLException {
-        return db.transaction(connection -> {
-            if (db.meta(connection, "purchase-items-imported") == null) {
-                db.setMeta(connection, "purchase-items-imported", serverId);
-                if (!legacy.isEmpty() && readPurchaseItems(connection).isEmpty()) {
-                    writePurchaseItems(connection, legacy);
-                    plugin.getLogger().info("Moved " + legacy.size() + " purchase item(s) from config.yml into the database;"
-                        + " purchase.items in config.yml is no longer used.");
-                }
-            }
-            return readPurchaseItems(connection);
-        });
+    /** 启动时读取购买物品。购买物品保存在数据库中，跨服时所有子服共用。 */
+    List<ItemStack> loadPurchaseItems() throws SQLException {
+        return db.withConnection(this::readPurchaseItems);
     }
 
     CompletableFuture<List<ItemStack>> reloadPurchaseItems() {

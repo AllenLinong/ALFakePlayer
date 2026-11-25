@@ -131,23 +131,17 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
             loadMessages(configs);
             maxSlots = option("slots.max_per_owner", 10, 1, 100);
             baseSlots = option("slots.default", 1, 1, maxSlots);
-            var legacyPurchaseItems = new ArrayList<ItemStack>();
-            for (Object item : getConfig().getList("purchase.items", List.of())) {
-                if (item instanceof ItemStack stack && !stack.getType().isAir() && stack.getAmount() > 0 && legacyPurchaseItems.size() < 3) {
-                    legacyPurchaseItems.add(stack.clone());
-                }
-            }
             double coins = getConfig().getDouble("purchase.coins", 300.0);
             int points = getConfig().getInt("purchase.points", 0);
             if (!Double.isFinite(coins) || coins < 0 || points < 0) {
                 throw new IllegalArgumentException("config.yml: purchase.coins and purchase.points must be zero or positive");
             }
             maxActive = option("slots.max_active_server", 20, 1, 200);
-            double legacyPrice = getConfig().getDouble("economy.summon_price", 300.0);
             for (DummyTier tier : DummyTier.values()) {
                 int chunks = option("performance.dummy_chunks." + tier.key, tier.defaultChunkSize, 3, 9);
                 tierRadius.put(tier, (chunks - 1) / 2);
-                double price = getConfig().getDouble("economy.tier_prices." + tier.key, legacyPrice);
+                // 缺少该项时取插件自带 config.yml 中的默认价格
+                double price = getConfig().getDouble("economy.tier_prices." + tier.key);
                 if (!Double.isFinite(price) || price < 0) {
                     throw new IllegalArgumentException("economy.tier_prices." + tier.key + " must be a finite non-negative number");
                 }
@@ -180,13 +174,12 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
             var networkSettings = Network.Settings.read(storage);
             database = Database.open(this, databaseSettings);
             database.migrate();
-            database.importLegacy(this, databaseSettings.file(), serverId);
             if (!database.mysql() && networkSettings.redis()) {
                 getLogger().warning("database.yml: redis.enabled is ignored because cross-server sync requires database.type: mysql.");
             }
             network = new Network(this, serverId, networkSettings, database.mysql());
             roster = new Roster(this, database, serverId, serverName, networkSettings.timeoutMillis(), networkSettings.heartbeatMillis());
-            purchasePrice = new PurchasePrice(coins, points, roster.loadPurchaseItems(legacyPurchaseItems));
+            purchasePrice = new PurchasePrice(coins, points, roster.loadPurchaseItems());
             network.start(database, this::handleRemote);
             folia = FoliaBridge.find();
             if (Bukkit.getPluginManager().isPluginEnabled("LuckPerms")) groups = new Groups.Luck();
@@ -1031,8 +1024,7 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
         Roster.Entry entry = roster.entries.get(key);
         if (entry == null) { msg(player, "rename_not_found"); return; }
         if (!name.matches("[A-Za-z0-9_]{1,16}") || Bukkit.getPlayerExact(name) != null || Bukkit.getOfflinePlayerIfCached(name) != null
-            || name.matches("[0-9]+") || name.equalsIgnoreCase("all") || name.regionMatches(true, 0, "AFP_", 0, 4)
-            || name.regionMatches(true, 0, "AFP~", 0, 4)) {
+            || name.matches("[0-9]+") || name.equalsIgnoreCase("all")) {
             msg(player, "bad_name"); return;
         }
         synchronized (roster) {

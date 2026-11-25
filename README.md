@@ -28,7 +28,7 @@
 
 ## 安装
 
-1. 把 `ALFakePlayer-1.1.0.jar` 放进 `plugins/`，重启服务器。
+1. 把 `ALFakePlayer-1.0.0.jar` 放进 `plugins/`，重启服务器。
 2. 首次启动会在 `plugins/ALFakePlayer/` 下生成 `config.yml`、`database.yml`、`menus/` 和 `lang/`。
 3. 召唤假人默认要扣金币，需要安装 Vault 和经济插件。不想收费的话，在 `config.yml` 中设置 `economy.enabled: false`。
 

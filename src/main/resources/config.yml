@@ -56,8 +56,6 @@ economy:
   # 开启后，选择档位时会先打开召唤确认菜单；把跨服运行中的假人召回本服不再收费
   # 没有 Vault 经济服务时无法召唤，请安装经济插件或改为 false
   enabled: true
-  # 旧版单一价格，只在从旧配置升级时用来填充各档位价格；请修改下面的 tier_prices
-  summon_price: 300.0
   # 各档位每次召唤的金币价格（不能为负数）
   tier_prices:
     normal: 300.0
