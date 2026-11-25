@@ -34,23 +34,23 @@ final class TabBenchmark {
 
     void command(CommandSender sender, String[] args) {
         if (args.length == 2 && args[1].equalsIgnoreCase("stop")) {
-            plugin.msg(sender, "benchmark-stopped", "count", clear());
+            plugin.msg(sender, "benchmark_stopped", "count", clear());
             return;
         }
-        if (args.length == 3 && args[1].equalsIgnoreCase("spawn")) {
+        if (args.length == 2) {
             try {
-                int count = Integer.parseInt(args[2]);
+                int count = Integer.parseInt(args[1]);
                 if (count >= 1 && count <= MAX_ENTRIES) {
                     Set<String> occupied = new HashSet<>();
                     for (Player player : Bukkit.getOnlinePlayers()) occupied.add(player.getName().toLowerCase(Locale.ROOT));
                     for (Roster.Entry entry : plugin.roster.entries.values()) occupied.add(entry.nativeName().toLowerCase(Locale.ROOT));
                     replace(count, occupied);
-                    plugin.msg(sender, "benchmark-spawned", "count", count);
+                    plugin.msg(sender, "benchmark_spawned", "count", count);
                     return;
                 }
             } catch (NumberFormatException ignored) { }
         }
-        plugin.msg(sender, "benchmark-help", "max", MAX_ENTRIES);
+        plugin.msg(sender, "benchmark_help", "max", MAX_ENTRIES);
     }
 
     private synchronized void replace(int count, Set<String> occupied) {

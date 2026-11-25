@@ -1,0 +1,68 @@
+config-version: 5
+language: zh_CN
+
+slots:
+  default: 1
+  max-per-owner: 10
+  max-active-server: 20
+
+# 购买一个假人，不是召唤费用。free 免费 / coins 金币 / points 点券 / items 物品。
+purchase:
+  mode: free
+  coins: 300.0
+  points: 100
+  # 使用 /afp purchaseitems 设置，最多三叠，完整匹配物品数据。
+  items: []
+
+luckperms:
+  group: 'default'
+
+economy:
+  enabled: false
+  # 兼容旧配置。当前各档位的召唤费用由 tier-prices 设置。
+  summon-price: 300.0
+  tier-prices:
+    normal: 300.0
+    pro: 600.0
+    promax: 1000.0
+
+teleport:
+  to-dummy-delay-seconds: 5
+  to-dummy-cooldown-seconds: 5
+
+performance:
+  simulation-distance: 2
+  # 假人的最大视距（区块半径）。Pro Max 的 10 档对应 9×9 区块。
+  view-distance: 4
+  dummy-chunks:
+    normal: 5
+    pro: 7
+    promax: 10
+  idle-target-interval-ticks: 3
+  idle-target-max-ticks: 20
+  use-interval-ticks: 4
+  save-interval-ticks: 200
+
+unloading:
+  enabled: true
+  interval-ticks: 40
+  max-retry-ticks: 160
+
+survival:
+  ignore-hostile-mobs: true
+  auto-eat-at-food-level: 2
+  minimum-tool-durability: 1
+  food-blacklist:
+    - ROTTEN_FLESH
+    - BEEF
+    - PORKCHOP
+    - CHICKEN
+    - MUTTON
+    - RABBIT
+    - COD
+    - SALMON
+    - TROPICAL_FISH
+    - PUFFERFISH
+  # 设为 0 时，静止不动的假人不会因站着而掉饱食度。
+  passive-exhaustion-per-second: 0.1
+  lethal-starvation-any-non-peaceful-difficulty: true

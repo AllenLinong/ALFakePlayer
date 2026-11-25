@@ -1,64 +1,101 @@
-config-version: 5
+config_version: 6
+
+# 主菜单 — 玩家的假人列表，指令 /afp 打开
+#
+# 布局：shape 每行 9 个字符（1–6 行），每个字符是一个格子，"." 为空格子；用到的字符在 items 中定义
+# 颜色代码使用 & 符号；name 为名称，lore 为描述
+#
+# 菜单图标写法：
+# 1. 原版物品：
+#    type: BEACON
+# 2. 资源包 CustomModelData：
+#    type: PAPER
+#    custom_model_data: 10001
+# 3. CraftEngine 自定义物品（推荐）：
+#    craftengine: "namespace:item_id"
+# 4. ItemsAdder 自定义物品：
+#    itemsadder: "namespace:item_id"
+# 兼容写法：
+#    plugin_item: "ce:namespace:item_id"
+#    plugin_item: "ia:namespace:item_id"
+#    type: "ce:namespace:item_id"
+# 使用自定义物品时，type 是备用外观：对应插件未安装或找不到物品时显示 type。
+# 注意：命名空间和物品ID之间必须使用英文半角冒号 ":"，不要使用中文全角冒号 "："。
+#
+# 特殊字符 A：假人列表格子（至少一个，所有 A 使用同一个物品定义）
+#   鼠标左键：未召唤时选择档位；已召唤（含其他子服）时打开召回确认
+#   鼠标右键：传送到假人身边（假人在其他子服时会把玩家送过去）
+#   Shift+右键：打开假人背包
+# action：page:previous 上一页 / page:next 下一页 / refresh 刷新 / new_dummy 打开购买确认 / close 关闭菜单 / none 无动作
+# 占位符：%current_page% 当前页、%total_pages% 总页数
+#         A 中可用 %name% 名字、%slot% 编号、%tier% 档位、%status% 状态
+#         %purchase_cost% 单独占一行时显示购买价格（可多行）
 main:
-  title: '&0我的假人 &8· &0第 %page% 页'
+  title: "&0我的假人"
   shape:
-    - '####T####'
-    - '#AAAAAAA#'
-    - 'N###X#G#P'
+    - "####T####"
+    - "#AAAAAAA#"
+    - "N###X#G#P"
   items:
-    '#':
-      type: GRAY_STAINED_GLASS_PANE
-      name: ' '
-      action: 'none'
     T:
       type: BOOK
-      name: '&b&l我的假人'
+      name: "&b&l我的假人"
       lore:
-        - '&6▶ &8假人管理'
-        - '&a▸&7购买后，假人会出现在此列表'
-      action: 'none'
+        - "&6▶ &8假人管理"
+        - "&a▸&7购买后，假人会出现在此列表"
+      action: "none"
     A:
       type: PLAYER_HEAD
-      name: '&e%name% &8(#%slot%)'
+      name: "&e%name% &8(#%slot%)"
       lore:
-        - '&6▶ &8假人信息'
-        - '&a▸&7档位：&f%tier%'
-        - '&a▸&7状态：%status%'
-        - ''
-        - '&6▶ &8操作'
-        - '&7•&a鼠标左键&a➤&f选择档位，或确认召回'
-        - '&7•&e鼠标右键&a➤&f传送到假人身边'
-        - '&7•&bShift+右键&a➤&f打开假人背包'
-      action: 'dummy'
+        - "&6▶ &8假人信息"
+        - "&a▸&7档位：&f%tier%"
+        - "&a▸&7状态：%status%"
+        - ""
+        - "&6▶ &8操作"
+        - "&7•&a鼠标左键&a➤&f选择档位，或召回到身边（支持跨服）"
+        - "&7•&e鼠标右键&a➤&f传送到假人身边（支持跨服）"
+        - "&7•&bShift+右键&a➤&f打开假人背包"
+      action: "dummy"
     N:
       type: ARROW
-      name: '&e上一页'
+      name: "&a上一页 (%current_page%/%total_pages%)"
       lore:
-        - '&6▶ &8操作'
-        - '&7•&a鼠标左键&a➤&f上一页'
-      action: 'page:previous'
+        - "&6▶ &8分页信息"
+        - "&a▸&7当前：%current_page%/%total_pages%"
+        - ""
+        - "&6▶ &8操作"
+        - "&7•&a鼠标左键&a➤&f翻到上一页"
+      action: "page:previous"
     X:
-      type: PAPER
-      name: '&7第 %page% 页'
+      type: BARRIER
+      name: "&c关闭菜单"
       lore:
-        - '&6▶ &8页码'
-        - '&a▸&7当前第 &f%page% &7页'
-      action: 'none'
+        - "&6▶ &8操作"
+        - "&7•&a鼠标左键&a➤&f关闭菜单"
+      action: "close"
     G:
       type: CHEST
-      name: '&a&l购买假人'
+      name: "&a&l购买假人"
       lore:
-        - '&6▶ &8购买信息'
-        - '&a▸&7购买后新增一个未召唤的假人'
-        - '%purchase_cost%'
-        - ''
-        - '&6▶ &8操作'
-        - '&7•&a鼠标左键&a➤&f查看并确认购买'
-      action: 'new_dummy'
+        - "&6▶ &8购买信息"
+        - "&a▸&7购买后新增一个未召唤的假人"
+        - "%purchase_cost%"
+        - ""
+        - "&6▶ &8操作"
+        - "&7•&a鼠标左键&a➤&f查看并确认购买"
+      action: "new_dummy"
     P:
       type: ARROW
-      name: '&e下一页'
+      name: "&a下一页 (%current_page%/%total_pages%)"
       lore:
-        - '&6▶ &8操作'
-        - '&7•&a鼠标左键&a➤&f下一页'
-      action: 'page:next'
+        - "&6▶ &8分页信息"
+        - "&a▸&7当前：%current_page%/%total_pages%"
+        - ""
+        - "&6▶ &8操作"
+        - "&7•&a鼠标左键&a➤&f翻到下一页"
+      action: "page:next"
+    "#":
+      type: GRAY_STAINED_GLASS_PANE
+      name: " "
+      action: "none"

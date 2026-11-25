@@ -17,45 +17,57 @@ import java.util.Objects;
 import java.util.function.Consumer;
 
 final class ConfigUpgrade {
-    private static final String VERSION = "config-version";
-    private static final List<String> MENUS = List.of("states", "main", "tier-select", "spawn-confirm",
-        "teleport-confirm", "purchase-confirm", "purchase-items", "inventory", "settings");
+    private static final String VERSION = "config_version";
+    private static final List<String> MENUS = List.of("states", "main", "tier_select", "spawn_confirm",
+        "teleport_confirm", "purchase_confirm", "purchase_items", "inventory", "settings");
     private final JavaPlugin plugin;
 
     ConfigUpgrade(JavaPlugin plugin) { this.plugin = plugin; }
 
     static String menuFile(String section) { return "menus/" + section + ".yml"; }
 
+    /** 1.1 之前的菜单文件名使用连字符，例如 menus/tier-select.yml。 */
+    private static String oldMenuFile(String section) { return "menus/" + section.replace('_', '-') + ".yml"; }
+
     YamlConfiguration loadMenus(Consumer<YamlConfiguration> validate) throws Exception {
         Path folder = plugin.getDataFolder().toPath();
         Path legacyFile = folder.resolve("menus.yml");
-        boolean importing = Files.exists(legacyFile)
-            && MENUS.stream().anyMatch(section -> Files.notExists(folder.resolve(menuFile(section))));
+        boolean importing = Files.exists(legacyFile) && MENUS.stream().anyMatch(section ->
+            Files.notExists(folder.resolve(menuFile(section))) && Files.notExists(folder.resolve(oldMenuFile(section))));
         YamlConfiguration legacy = importing ? read(legacyFile) : null;
         int legacyVersion = importing ? version(legacy, "menus.yml") : 0;
         var legacyHistory = importing ? history("menus.yml", legacyVersion) : List.<YamlConfiguration>of();
         var combined = new YamlConfiguration();
         var writes = new ArrayList<RunnableWithIo>();
-        boolean hasSplitMenus = MENUS.stream().anyMatch(section -> Files.exists(folder.resolve(menuFile(section))));
+        boolean hasSplitMenus = MENUS.stream().anyMatch(section ->
+            Files.exists(folder.resolve(menuFile(section))) || Files.exists(folder.resolve(oldMenuFile(section))));
         for (String section : MENUS) {
             String name = menuFile(section);
             Path path = folder.resolve(name);
+            // 旧文件名（连字符）在升级时改为下划线文件名，原文件备份后删除
+            Path oldPath = folder.resolve(oldMenuFile(section));
+            Path source = Files.exists(path) ? path : Files.exists(oldPath) ? oldPath : null;
             YamlConfiguration defaults = resource(name);
             int targetVersion = version(defaults, name);
             if (targetVersion < 1 || !defaults.isConfigurationSection(section)) {
                 throw new IOException("Invalid bundled menu: " + name);
             }
             YamlConfiguration selected = defaults;
-            if (Files.exists(path)) {
-                YamlConfiguration saved = read(path);
+            if (source != null) {
+                YamlConfiguration raw = readRaw(source);
+                YamlConfiguration saved = underscored(raw);
                 int savedVersion = version(saved, name);
                 if (savedVersion > targetVersion) throw newer(name, savedVersion);
+                boolean renamed = !source.equals(path) || !raw.getKeys(true).equals(saved.getKeys(true));
+                String backupName = "menus/" + source.getFileName();
+                YamlConfiguration result = savedVersion == targetVersion ? saved : defaults;
                 if (savedVersion == targetVersion) selected = saved;
-                else {
-                    merge(defaults, saved, history(name, savedVersion), true);
+                else merge(defaults, saved, history(name, savedVersion), true);
+                if (savedVersion != targetVersion || renamed) {
                     writes.add(() -> {
-                        backup(name, path, savedVersion);
-                        write(path, defaults);
+                        backup(backupName, source, savedVersion);
+                        write(path, result);
+                        if (!source.equals(path)) Files.deleteIfExists(source);
                     });
                 }
             } else {
@@ -113,18 +125,25 @@ final class ConfigUpgrade {
             return current;
         }
 
-        YamlConfiguration saved = read(file);
+        YamlConfiguration raw = readRaw(file);
+        YamlConfiguration saved = underscored(raw);
         int sourceVersion = version(saved, name);
         if (sourceVersion > targetVersion) {
             throw newer(name, sourceVersion);
         }
         if (sourceVersion == targetVersion) {
             validate.accept(saved);
+            if (!raw.getKeys(true).equals(saved.getKeys(true))) {
+                Path backup = backup(name, file, sourceVersion);
+                write(file, saved);
+                plugin.getLogger().info("Renamed hyphenated keys in " + name + " to underscores; backup: " + backup.getFileName());
+            }
             return saved;
         }
         List<YamlConfiguration> history = history(name, sourceVersion);
         merge(current, saved, history, name.equals("menus.yml"));
         migrateLegacyTierPrices(name, current, saved, history);
+        migratePurchaseMode(name, current, saved);
         validate.accept(current);
         Path backup = backup(name, file, sourceVersion);
         write(file, current);
@@ -143,14 +162,42 @@ final class ConfigUpgrade {
 
     private static void migrateLegacyTierPrices(String name, YamlConfiguration current, YamlConfiguration saved,
                                                 List<YamlConfiguration> history) {
-        if (!name.equals("config.yml") || saved.contains("economy.tier-prices")) return;
-        Object legacyValue = saved.get("economy.summon-price");
-        if (!(legacyValue instanceof Number number) || matchesDefault(history, "economy.summon-price", legacyValue)) return;
+        if (!name.equals("config.yml") || saved.contains("economy.tier_prices")) return;
+        Object legacyValue = saved.get("economy.summon_price");
+        if (!(legacyValue instanceof Number number) || matchesDefault(history, "economy.summon_price", legacyValue)) return;
         double price = number.doubleValue();
         if (!Double.isFinite(price) || price < 0) return;
-        current.set("economy.tier-prices.normal", price);
-        current.set("economy.tier-prices.pro", price);
-        current.set("economy.tier-prices.promax", price);
+        current.set("economy.tier_prices.normal", price);
+        current.set("economy.tier_prices.pro", price);
+        current.set("economy.tier_prices.promax", price);
+    }
+
+    /**
+     * 1.0.x 的 purchase.mode 只能选一种货币；新版金币、点券、物品可同时要求。
+     * 按旧模式换算成对应的价格组合，未改过的默认值 free 按新默认值（金币）处理。
+     */
+    private static void migratePurchaseMode(String name, YamlConfiguration current, YamlConfiguration saved) {
+        if (!name.equals("config.yml") || !saved.contains("purchase.mode")) return;
+        String mode = String.valueOf(saved.getString("purchase.mode", "free")).toLowerCase(java.util.Locale.ROOT);
+        // 购买物品改存数据库：只有旧模式为 items 时保留 purchase.items，供启动时一次性导入
+        switch (mode) {
+            case "coins" -> {
+                current.set("purchase.points", 0);
+                current.set("purchase.items", null);
+            }
+            case "points" -> {
+                current.set("purchase.coins", 0.0);
+                current.set("purchase.points", saved.getInt("purchase.points", 100));
+                current.set("purchase.items", null);
+            }
+            case "items" -> {
+                current.set("purchase.coins", 0.0);
+                current.set("purchase.points", 0);
+                current.set("purchase.items", saved.getList("purchase.items", List.of()));
+            }
+            default -> current.set("purchase.items", null);
+        }
+        current.set("purchase.mode", null);
     }
 
     private boolean importLegacyMessages(YamlConfiguration current) throws Exception {
@@ -179,6 +226,10 @@ final class ConfigUpgrade {
             }
         } else {
             var defaults = resource("config-history/v" + version + "/" + name);
+            if (defaults == null && name.startsWith("menus/")) {
+                String section = name.substring("menus/".length(), name.length() - ".yml".length());
+                defaults = resource("config-history/v" + version + "/" + oldMenuFile(section));
+            }
             if (defaults != null) history.add(defaults);
         }
         return history;
@@ -225,7 +276,7 @@ final class ConfigUpgrade {
         if (yaml == null) throw new IOException("Missing bundled configuration: " + name);
         if (!yaml.contains(VERSION)) return 0;
         if (yaml.get(VERSION) instanceof Integer version && version >= 0) return version;
-        throw new IOException(name + ": config-version must be a non-negative integer");
+        throw new IOException(name + ": config_version must be a non-negative integer");
     }
 
     private YamlConfiguration resource(String name) throws Exception {
@@ -233,14 +284,43 @@ final class ConfigUpgrade {
             if (stream == null) return null;
             var yaml = new YamlConfiguration();
             yaml.load(new InputStreamReader(stream, StandardCharsets.UTF_8));
-            return yaml;
+            return underscored(yaml);
         }
     }
 
-    private static YamlConfiguration read(Path file) throws Exception {
+    /** 读取已有文件，并把旧键名转换为下划线写法。 */
+    private static YamlConfiguration read(Path file) throws Exception { return underscored(readRaw(file)); }
+
+    private static YamlConfiguration readRaw(Path file) throws Exception {
         var yaml = new YamlConfiguration();
         yaml.load(file.toFile());
         return yaml;
+    }
+
+    /**
+     * 1.1 起所有配置键名使用下划线（例如 max_per_owner、config_version）。
+     * 把旧键名中的连字符换成下划线；单字符的键（菜单图标符号，例如 '-'）保持不变；值不做改动。
+     */
+    static YamlConfiguration underscored(YamlConfiguration source) {
+        var target = new YamlConfiguration();
+        target.options().setHeader(source.options().getHeader());
+        target.options().setFooter(source.options().getFooter());
+        for (String key : source.getKeys(true)) {
+            String path = underscore(key);
+            if (source.isConfigurationSection(key)) target.createSection(path);
+            else target.set(path, source.get(key));
+            target.setComments(path, source.getComments(key));
+            target.setInlineComments(path, source.getInlineComments(key));
+        }
+        return target;
+    }
+
+    private static String underscore(String path) {
+        String[] parts = path.split("\\.", -1);
+        for (int index = 0; index < parts.length; index++) {
+            if (parts[index].length() > 1) parts[index] = parts[index].replace('-', '_');
+        }
+        return String.join(".", parts);
     }
 
     private static void write(Path file, YamlConfiguration yaml) throws IOException {

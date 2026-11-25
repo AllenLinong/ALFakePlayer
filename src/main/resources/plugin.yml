@@ -1,9 +1,9 @@
 name: ALFakePlayer
-version: '1.0.0'
+version: '${version}'
 main: io.github.dummyplayers.DummyPlayers
 folia-supported: true
 api-version: '26.1.2'
-softdepend: [LuckPerms, Vault, PlaceholderAPI, PlayerPoints]
+softdepend: [LuckPerms, Vault, PlaceholderAPI, PlayerPoints, CraftEngine, ItemsAdder]
 commands:
   alfakeplayer:
     description: 管理假人

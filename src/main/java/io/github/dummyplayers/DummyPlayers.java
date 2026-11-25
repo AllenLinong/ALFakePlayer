@@ -2,6 +2,7 @@ package io.github.dummyplayers;
 
 import com.destroystokyo.paper.event.entity.PreCreatureSpawnEvent;
 import com.destroystokyo.paper.event.server.PaperServerListPingEvent;
+import com.google.gson.JsonObject;
 import com.mojang.authlib.GameProfile;
 import io.papermc.paper.event.player.PlayerTrackEntityEvent;
 import net.kyori.adventure.text.Component;
@@ -38,21 +39,29 @@ import org.bukkit.plugin.java.JavaPlugin;
 
 import java.math.BigDecimal;
 import java.util.*;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Consumer;
 import java.util.logging.Level;
 
 public final class DummyPlayers extends JavaPlugin implements Listener, TabExecutor {
     static final String USE = "alfakeplayer.use", ADMIN = "alfakeplayer.admin", TELEPORT = "alfakeplayer.teleport";
-    private static final Set<String> TELEPORT_ACTIONS = Set.of("tp", "teleport", "tph", "bring");
+    private static final List<String> TIER_NAMES = List.of("normal", "pro", "promax");
+    private static final Set<String> PLAYER_ACTIONS = Set.of("spawn", "list", "b", "dir", "rename", "tp", "tph");
     private static final NamespacedKey RENAME_CARD = Objects.requireNonNull(NamespacedKey.fromString("alfakeplayer:rename_card"));
+    private static final int MAX_COMPLETIONS = 100;
     static final LegacyComponentSerializer TEXT = LegacyComponentSerializer.legacyAmpersand();
     final Map<UUID, Live> live = new ConcurrentHashMap<>();
     private final Set<UUID> pending = new HashSet<>();
+    /** clear 指令的二次确认：发送者|目标 → 截止时间。 */
+    private final Map<String, Long> clearConfirmations = new ConcurrentHashMap<>();
     private final Object admissions = new Object();
     Roster roster;
     Menus menus;
     RosterMenus rosterMenus;
+    Network network;
+    private Database database;
     private final DummyTeleport teleports = new DummyTeleport(this);
     private final TabBenchmark benchmark = new TabBenchmark(this);
     private final EnumMap<DummyTier, Integer> tierViewDistances = new EnumMap<>(DummyTier.class);
@@ -62,13 +71,15 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
     private volatile PurchasePrice purchasePrice;
     private FoliaBridge folia;
     private YamlConfiguration messages;
+    String serverId = "server", serverName = "server";
     private int maxActive, baseSlots, maxSlots, simulationDistance, viewDistance, saveInterval;
     int targetInterval, idleMaxInterval, useInterval, eatLevel, minimumDurability, unloadInterval, unloadMaxInterval;
     float passiveExhaustion;
     boolean lethalStarvation, unloadChests;
     Set<Material> foodBlacklist = Set.of();
-    private boolean ignoreHostileMobs;
+    private boolean ignoreHostileMobs, affectsSpawning;
     private boolean paidSummoning;
+    private volatile boolean shuttingDown;
 
     static final class Live {
         final Roster.Entry entry;
@@ -78,6 +89,7 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
         volatile boolean dead;
         volatile boolean relocating;
         volatile boolean inWorld;
+        volatile CompletableFuture<Void> released = CompletableFuture.completedFuture(null);
         int tick;
 
         Live(Roster.Entry entry, NativeDummy dummy) {
@@ -87,6 +99,8 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
             hiddenTag = new DummyNames.HiddenTag(entry);
         }
     }
+
+    // ══ 启动 ══════════════════════════════════════════════
 
     @Override public void onEnable() {
         String version = Bukkit.getMinecraftVersion();
@@ -100,6 +114,13 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
             var configs = new ConfigUpgrade(this);
             configs.load("config.yml", yaml -> { });
             reloadConfig();
+            serverId = getConfig().getString("server_id", "server").strip();
+            if (!serverId.matches("[A-Za-z0-9_.-]{1,64}")) {
+                throw new IllegalArgumentException("config.yml: server_id must be 1-64 letters, digits, '.', '-' or '_'");
+            }
+            serverName = getConfig().getString("server_name", serverId).strip();
+            if (serverName.isEmpty()) serverName = serverId;
+            if (serverName.length() > 128) serverName = serverName.substring(0, 128);
             YamlConfiguration menuConfig = configs.loadMenus(yaml -> {
                 Menus.validate(yaml);
                 RosterMenus.validate(yaml);
@@ -107,52 +128,66 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
             menus = new Menus(this, menuConfig);
             rosterMenus = new RosterMenus(this, menuConfig);
             loadMessages(configs);
-            maxSlots = option("slots.max-per-owner", 10, 1, 100);
+            maxSlots = option("slots.max_per_owner", 10, 1, 100);
             baseSlots = option("slots.default", 1, 1, maxSlots);
-            var purchaseItems = new ArrayList<ItemStack>();
+            var legacyPurchaseItems = new ArrayList<ItemStack>();
             for (Object item : getConfig().getList("purchase.items", List.of())) {
-                if (!(item instanceof ItemStack stack) || stack.getType().isAir() || stack.getAmount() <= 0 || purchaseItems.size() == 3) {
-                    throw new IllegalArgumentException("purchase.items must contain at most three valid item stacks");
+                if (item instanceof ItemStack stack && !stack.getType().isAir() && stack.getAmount() > 0 && legacyPurchaseItems.size() < 3) {
+                    legacyPurchaseItems.add(stack.clone());
                 }
-                purchaseItems.add(stack.clone());
             }
-            String mode = getConfig().getString("purchase.mode", "free").toLowerCase(Locale.ROOT);
             double coins = getConfig().getDouble("purchase.coins", 300.0);
-            int points = getConfig().getInt("purchase.points", 100);
-            if (!Set.of("free", "coins", "points", "items").contains(mode) || !Double.isFinite(coins) || coins <= 0 || points <= 0) {
-                throw new IllegalArgumentException("Invalid purchase mode or price");
+            int points = getConfig().getInt("purchase.points", 0);
+            if (!Double.isFinite(coins) || coins < 0 || points < 0) {
+                throw new IllegalArgumentException("config.yml: purchase.coins and purchase.points must be zero or positive");
             }
-            purchasePrice = new PurchasePrice(mode, coins, points, purchaseItems);
-            maxActive = option("slots.max-active-server", 20, 1, 200);
-            viewDistance = option("performance.view-distance", 4, 2, 10);
-            simulationDistance = option("performance.simulation-distance", 2, 2, viewDistance);
-            double legacyPrice = getConfig().getDouble("economy.summon-price", 300.0);
+            maxActive = option("slots.max_active_server", 20, 1, 200);
+            viewDistance = option("performance.view_distance", 4, 2, 10);
+            simulationDistance = option("performance.simulation_distance", 2, 2, viewDistance);
+            double legacyPrice = getConfig().getDouble("economy.summon_price", 300.0);
             for (DummyTier tier : DummyTier.values()) {
-                int chunks = option("performance.dummy-chunks." + tier.key, tier.defaultChunkSize, 5, 10);
+                int chunks = option("performance.dummy_chunks." + tier.key, tier.defaultChunkSize, 5, 10);
                 tierViewDistances.put(tier, Math.clamp((chunks - 1) / 2, 2, viewDistance));
-                double price = getConfig().getDouble("economy.tier-prices." + tier.key, legacyPrice);
+                double price = getConfig().getDouble("economy.tier_prices." + tier.key, legacyPrice);
                 if (!Double.isFinite(price) || price < 0) {
-                    throw new IllegalArgumentException("economy.tier-prices." + tier.key + " must be a finite non-negative number");
+                    throw new IllegalArgumentException("economy.tier_prices." + tier.key + " must be a finite non-negative number");
                 }
                 tierPrices.put(tier, price);
             }
-            targetInterval = option("performance.idle-target-interval-ticks", 3, 1, 20);
-            idleMaxInterval = option("performance.idle-target-max-ticks", 20, targetInterval, 100);
-            useInterval = option("performance.use-interval-ticks", 4, 4, 100);
-            saveInterval = option("performance.save-interval-ticks", 200, 40, 12000);
-            eatLevel = option("survival.auto-eat-at-food-level", 2, 0, 19);
-            minimumDurability = option("survival.minimum-tool-durability", 1, 1, 1000);
-            foodBlacklist = readFoodBlacklist(getConfig().getStringList("survival.food-blacklist"));
+            targetInterval = option("performance.idle_target_interval_ticks", 3, 1, 20);
+            idleMaxInterval = option("performance.idle_target_max_ticks", 20, targetInterval, 100);
+            useInterval = option("performance.use_interval_ticks", 4, 4, 100);
+            saveInterval = option("performance.save_interval_ticks", 200, 40, 12000);
+            affectsSpawning = getConfig().getBoolean("performance.affects_spawning", true);
+            eatLevel = option("survival.auto_eat_at_food_level", 2, 0, 19);
+            minimumDurability = option("survival.minimum_tool_durability", 1, 1, 1000);
+            foodBlacklist = readFoodBlacklist(getConfig().getStringList("survival.food_blacklist"));
             unloadChests = getConfig().getBoolean("unloading.enabled", true);
-            unloadInterval = option("unloading.interval-ticks", 40, 20, 1200);
-            unloadMaxInterval = option("unloading.max-retry-ticks", 160, unloadInterval, 2400);
-            passiveExhaustion = (float) Math.clamp(getConfig().getDouble("survival.passive-exhaustion-per-second"), 0.0, 4.0);
-            lethalStarvation = getConfig().getBoolean("survival.lethal-starvation-any-non-peaceful-difficulty");
-            ignoreHostileMobs = getConfig().getBoolean("survival.ignore-hostile-mobs", true);
-            paidSummoning = getConfig().getBoolean("economy.enabled", false);
-            teleports.configure(option("teleport.to-dummy-delay-seconds", 5, 0, 300),
-                option("teleport.to-dummy-cooldown-seconds", 5, 0, 300));
-            roster = new Roster(this);
+            unloadInterval = option("unloading.interval_ticks", 40, 20, 1200);
+            unloadMaxInterval = option("unloading.max_retry_ticks", 160, unloadInterval, 2400);
+            passiveExhaustion = (float) Math.clamp(getConfig().getDouble("survival.passive_exhaustion_per_second"), 0.0, 4.0);
+            lethalStarvation = getConfig().getBoolean("survival.lethal_starvation_any_non_peaceful_difficulty");
+            ignoreHostileMobs = getConfig().getBoolean("survival.ignore_hostile_mobs", true);
+            paidSummoning = getConfig().getBoolean("economy.enabled", true);
+            teleports.configure(option("teleport.to_dummy_delay_seconds", 5, 0, 300),
+                option("teleport.to_dummy_cooldown_seconds", 5, 0, 300));
+
+            YamlConfiguration storage = configs.load("database.yml", yaml -> {
+                Database.Settings.read(yaml);
+                Network.Settings.read(yaml);
+            });
+            var databaseSettings = Database.Settings.read(storage);
+            var networkSettings = Network.Settings.read(storage);
+            database = Database.open(this, databaseSettings);
+            database.migrate();
+            database.importLegacy(this, databaseSettings.file(), serverId);
+            if (!database.mysql() && networkSettings.redis()) {
+                getLogger().warning("database.yml: redis.enabled is ignored because cross-server sync requires database.type: mysql.");
+            }
+            network = new Network(this, serverId, networkSettings, database.mysql());
+            roster = new Roster(this, database, serverId, serverName, networkSettings.timeoutMillis(), networkSettings.heartbeatMillis());
+            purchasePrice = new PurchasePrice(coins, points, roster.loadPurchaseItems(legacyPurchaseItems));
+            network.start(database, this::handleRemote);
             folia = FoliaBridge.find();
             if (Bukkit.getPluginManager().isPluginEnabled("LuckPerms")) groups = new Groups.Luck();
             else getLogger().info("LuckPerms not installed; fake players still appear in the vanilla tab list.");
@@ -164,6 +199,10 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
             Bukkit.getPluginManager().registerEvents(menus, this);
             Bukkit.getPluginManager().registerEvents(rosterMenus, this);
             Bukkit.getGlobalRegionScheduler().runAtFixedRate(this, task -> roster.save(), saveInterval, saveInterval);
+            Bukkit.getAsyncScheduler().runAtFixedRate(this, task -> roster.heartbeat(summonedCount()),
+                1000, networkSettings.heartbeatMillis(), TimeUnit.MILLISECONDS);
+            // 其他插件全部启动后再检查经济服务，提示缺失的依赖
+            Bukkit.getGlobalRegionScheduler().runDelayed(this, task -> checkServices(), 1);
         } catch (Exception | LinkageError error) {
             getLogger().log(Level.SEVERE, "Cannot start ALFakePlayer", error);
             Bukkit.getPluginManager().disablePlugin(this);
@@ -173,6 +212,21 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
     private static boolean patchAtLeastTwo(String version) {
         try { return Integer.parseInt(version.substring(5)) >= 2; }
         catch (NumberFormatException ignored) { return false; }
+    }
+
+    private void checkServices() {
+        try {
+            if ((paidSummoning || purchasePrice.coins() > 0) && SpawnFee.find(1) == null) {
+                getLogger().warning("No Vault economy service found. Summoning fees (economy.enabled) and coin purchases"
+                    + " (purchase.coins) will fail until Vault and an economy plugin are installed;"
+                    + " set them to false / 0 in config.yml to make them free.");
+            }
+        } catch (ReflectiveOperationException | RuntimeException | LinkageError error) {
+            getLogger().warning("Could not check the Vault economy service: " + error);
+        }
+        if (purchasePrice.points() > 0 && !Bukkit.getPluginManager().isPluginEnabled("PlayerPoints")) {
+            getLogger().warning("purchase.points is set but PlayerPoints is not installed; purchases will fail.");
+        }
     }
 
     private void loadMessages(ConfigUpgrade configs) throws Exception {
@@ -198,16 +252,20 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
         Set<Material> materials = EnumSet.noneOf(Material.class);
         for (String name : names) {
             Material material = Material.matchMaterial(name.strip());
-            if (material == null || !material.isItem()) getLogger().warning("Invalid survival.food-blacklist entry: " + name);
+            if (material == null || !material.isItem()) getLogger().warning("Invalid survival.food_blacklist entry: " + name);
             else materials.add(material);
         }
         return Set.copyOf(materials);
     }
 
-    String menuTierName(DummyTier tier) { return messages.getString("tier-name." + tier.key, tier.key); }
+    // ══ 菜单与状态查询 ═════════════════════════════════════
+
+    String menuTierName(DummyTier tier) { return messages.getString("tier_name." + tier.key, tier.key); }
     String menuPrice(DummyTier tier) {
         return BigDecimal.valueOf(paidSummoning ? tierPrices.get(tier) : 0).stripTrailingZeros().toPlainString();
     }
+    /** 收费召唤时先打开确认菜单。 */
+    boolean summonNeedsConfirm(DummyTier tier) { return paidSummoning && tierPrices.get(tier) > 0; }
 
     boolean summoned(Roster.Entry entry) {
         return isSummoned(live.get(entry.id));
@@ -217,24 +275,31 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
         return active != null && active.inWorld && !active.dead;
     }
 
+    private int summonedCount() {
+        int count = 0;
+        for (Live active : live.values()) if (isSummoned(active)) count++;
+        return count;
+    }
+
+    String serverLabel(String server) {
+        return server == null ? messages.getString("other_server", "?") : roster.serverName(server);
+    }
+
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
     public void onServerListPing(PaperServerListPingEvent event) {
         if (event.shouldHidePlayers()) return;
-        int summonedCount = 0;
-        for (Live active : live.values()) {
-            if (isSummoned(active)) summonedCount++;
-        }
+        int summonedCount = summonedCount();
         if (summonedCount > 0) event.setNumPlayers(event.getNumPlayers() + summonedCount);
     }
 
     void requestTeleportFromMenu(Player player, int slot, boolean bring) {
-        if (!player.hasPermission(TELEPORT)) msg(player, "no-permission");
+        if (!player.hasPermission(TELEPORT)) msg(player, "no_permission");
         else teleports.request(player, slot, bring);
     }
 
     void summonFromMenu(Player player, Roster.Entry expected, int slot, DummyTier tier) {
         if (!player.hasPermission(USE) || slot < 1 || slot > slots(player.getUniqueId())) return;
-        if (roster.entries.get(new Roster.Key(player.getUniqueId(), slot)) != expected) { msg(player, "not-found"); return; }
+        if (roster.entries.get(new Roster.Key(player.getUniqueId(), slot)) != expected) { msg(player, "not_found"); return; }
         summon(player, slot, tier);
     }
 
@@ -244,41 +309,59 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
         return itemText(messages.getString(key, key).replace("%price%", price));
     }
 
-    synchronized boolean savePurchaseItems(List<ItemStack> items) {
+    // ══ 购买 ══════════════════════════════════════════════
+
+    /** 保存购买所需物品到数据库并通知其他子服；结果在存储线程上完成。 */
+    CompletableFuture<Boolean> savePurchaseItems(List<ItemStack> items) {
         var previous = purchasePrice;
-        getConfig().set("purchase.items", items);
-        try {
-            getConfig().save(new java.io.File(getDataFolder(), "config.yml"));
-            purchasePrice = new PurchasePrice(previous.mode(), previous.coins(), previous.points(), items);
+        return roster.savePurchaseItems(items).handle((unused, error) -> {
+            if (error != null) {
+                getLogger().log(Level.WARNING, "Could not save purchase items", error);
+                return false;
+            }
+            purchasePrice = new PurchasePrice(previous.coins(), previous.points(), items);
+            network.broadcast("purchase_items", new JsonObject());
             return true;
-        } catch (java.io.IOException error) {
-            getConfig().set("purchase.items", previous.items());
-            getLogger().log(Level.WARNING, "Could not save purchase items", error);
-            return false;
-        }
+        });
     }
 
-    int buyDummy(Player player, PurchasePrice quoted) {
-        if (!player.hasPermission(USE)) return -1;
+    /**
+     * 购买：先在数据库中占用最小的空闲编号，再扣费；扣费失败时删除刚占用的编号。
+     * 结果为新假人的编号，失败时为 -1。
+     */
+    CompletableFuture<Integer> buyDummy(Player player, PurchasePrice quoted) {
+        if (!player.hasPermission(USE)) return CompletableFuture.completedFuture(-1);
         UUID owner = player.getUniqueId();
-        int number = 1;
-        while (number <= maxSlots && roster.entries.containsKey(new Roster.Key(owner, number))) number++;
-        if (number > maxSlots) { msg(player, "purchase-limit"); return -1; }
-        if (quoted != purchasePrice) { msg(player, "purchase-changed"); return -1; }
-        try {
-            if (!quoted.take(player)) { msg(player, "purchase-insufficient"); return -1; }
-        } catch (ReflectiveOperationException | RuntimeException | LinkageError error) {
-            getLogger().log(Level.WARNING, "Could not charge fake player purchase", error);
-            msg(player, "purchase-unavailable");
-            return -1;
-        }
-        synchronized (roster) {
-            if (number > slots(owner)) roster.setAllowance(owner, number);
-            roster.create(new Roster.Key(owner, number));
-            roster.save();
-        }
-        msg(player, "purchase-success");
-        return number;
+        if (roster.owned(owner).size() >= maxSlots) { msg(player, "purchase_limit"); return CompletableFuture.completedFuture(-1); }
+        if (quoted != purchasePrice) { msg(player, "purchase_changed"); return CompletableFuture.completedFuture(-1); }
+        var result = new CompletableFuture<Integer>();
+        roster.create(owner, maxSlots).whenComplete((entry, error) -> {
+            if (error != null || entry == null) {
+                if (error != null) getLogger().log(Level.WARNING, "Could not reserve a fake player slot", error);
+                tell(player, () -> msg(player, error != null ? "storage_error" : "purchase_limit"));
+                result.complete(-1);
+                return;
+            }
+            Runnable abandon = () -> { roster.delete(entry); result.complete(-1); };
+            if (!player.getScheduler().execute(this, () -> {
+                boolean paid;
+                try {
+                    if (quoted != purchasePrice) { msg(player, "purchase_changed"); abandon.run(); return; }
+                    paid = quoted.take(player);
+                } catch (ReflectiveOperationException | RuntimeException | LinkageError problem) {
+                    getLogger().log(Level.WARNING, "Could not charge fake player purchase", problem);
+                    msg(player, "purchase_unavailable");
+                    abandon.run();
+                    return;
+                }
+                if (!paid) { msg(player, "purchase_insufficient"); abandon.run(); return; }
+                if (entry.key.slot() > slots(owner)) roster.setAllowance(owner, entry.key.slot());
+                roster.commit().thenRun(() -> invalidate(owner));
+                msg(player, "purchase_success");
+                result.complete(entry.key.slot());
+            }, abandon, 1)) abandon.run();
+        });
+        return result;
     }
 
     void saveDirection(Roster.Entry entry, float yaw) {
@@ -287,6 +370,8 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
         roster.dirty(entry);
         roster.save();
     }
+
+    // ══ 消息 ══════════════════════════════════════════════
 
     void msg(CommandSender sender, String key, Object... pairs) {
         String value = messages.getString(key, key);
@@ -299,23 +384,35 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
         sender.sendMessage(rendered);
     }
 
+    /** 回到发送者所在线程执行（玩家用实体调度器，后台用全局调度器）。 */
+    private void tell(CommandSender sender, Runnable action) {
+        if (sender instanceof Player player) player.getScheduler().execute(this, action, null, 1);
+        else Bukkit.getGlobalRegionScheduler().execute(this, action);
+    }
+
+    /** 玩家帮助：只列玩家指令；管理员额外看到一行 admin help 提示。后台没有玩家指令，直接显示管理员帮助。 */
     private void sendHelp(CommandSender sender) {
-        boolean player = sender instanceof Player;
-        boolean manage = player && sender.hasPermission(USE);
+        boolean manage = sender instanceof Player && sender.hasPermission(USE);
         boolean admin = sender.hasPermission(ADMIN);
-        if (!manage && !admin) { msg(sender, "no-permission"); return; }
-        String command = player ? "/afp" : "afp";
-        helpLines(sender, "header", command);
-        if (manage) {
-            helpLines(sender, "manage", command);
-            helpLines(sender, "tiers", command);
-            if (sender.hasPermission(TELEPORT)) helpLines(sender, "teleport", command);
+        if (!manage) {
+            if (admin) sendAdminHelp(sender);
+            else msg(sender, "no_permission");
+            return;
         }
-        if (admin) helpLines(sender, "admin", command);
+        helpLines(sender, "header", "/afp");
+        helpLines(sender, "manage", "/afp");
+        if (sender.hasPermission(TELEPORT)) helpLines(sender, "teleport", "/afp");
+        if (admin) helpLines(sender, "admin_hint", "/afp");
+    }
+
+    /** admin help：管理员指令，只有管理员可以查看。 */
+    private void sendAdminHelp(CommandSender sender) {
+        if (!sender.hasPermission(ADMIN)) { msg(sender, "no_permission"); return; }
+        helpLines(sender, "admin", sender instanceof Player ? "/afp" : "afp");
     }
 
     private void helpLines(CommandSender sender, String group, String command) {
-        for (String line : messages.getStringList("command-help." + group)) {
+        for (String line : messages.getStringList("command_help." + group)) {
             sender.sendMessage(TEXT.deserialize(line.replace("%command%", command)));
         }
     }
@@ -327,6 +424,8 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
             && entry.key.slot() <= slots(player.getUniqueId()) && roster.entries.get(entry.key) == entry;
     }
 
+    // ══ 召唤 ══════════════════════════════════════════════
+
     private void summon(Player owner, int slot, DummyTier requestedTier) {
         UUID ownerId = owner.getUniqueId();
         Roster.Entry entry;
@@ -334,31 +433,73 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
         synchronized (admissions) {
             if (Bukkit.isStopping() || !isEnabled()) return;
             entry = roster.entries.get(new Roster.Key(ownerId, slot));
-            if (entry == null) { msg(owner, "purchase-required"); return; }
-            if (live.containsKey(entry.id) || pending.contains(entry.id)) { msg(owner, "already-live"); return; }
-            if (live.size() + pending.size() >= maxActive) {
-                msg(owner, "server-limit"); return;
-            }
+            if (entry == null) { msg(owner, "purchase_required"); return; }
+            if (live.containsKey(entry.id) || pending.contains(entry.id)) { msg(owner, "already_live"); return; }
+            String remote = roster.remoteHolder(entry);
+            if (remote != null) { msg(owner, "remote_live", "server", serverLabel(remote), "slot", slot); return; }
+            if (live.size() + pending.size() >= maxActive) { msg(owner, "server_limit"); return; }
             selectedTier = requestedTier == null ? entry.tier : requestedTier;
             pending.add(entry.id);
         }
-        DummyTier tier = selectedTier;
-        Location position = owner.getLocation();
+        admit(owner, entry, selectedTier);
+    }
+
+    /**
+     * 把在其他子服运行的假人召回到玩家身边：请求对方收回并保存，然后在本服生成。
+     * 假人已经召唤并付过费，跨服召回不再收费，保持原档位。
+     */
+    void transfer(Player player, Roster.Entry entry, String holder) {
+        synchronized (admissions) {
+            if (Bukkit.isStopping() || !isEnabled()) return;
+            if (live.containsKey(entry.id) || pending.contains(entry.id)) { msg(player, "already_live"); return; }
+            if (live.size() + pending.size() >= maxActive) { msg(player, "server_limit"); return; }
+            pending.add(entry.id);
+        }
+        msg(player, "transfer_wait", "slot", entry.key.slot(), "server", serverLabel(holder));
+        var body = new JsonObject();
+        body.addProperty("dummy", entry.id.toString());
+        body.addProperty("mode", "transfer");
+        network.request(holder, "release", body).whenComplete((reply, error) -> {
+            // 对方没有回应时仍尝试接管：如果它已经失联，租约过期后即可召回
+            if (error == null && reply != null && reply.has("ok") && !reply.get("ok").getAsBoolean()) {
+                clearPending(entry);
+                tell(player, () -> msg(player, "remote_busy", "server", serverLabel(holder)));
+                return;
+            }
+            admit(player, entry, null);
+        });
+    }
+
+    /** 准备权限组并获取运行租约，再回到玩家所在区域生成。tier 为 null 表示跨服召回。 */
+    private void admit(Player owner, Roster.Entry entry, DummyTier tier) {
         groups.prepare(entry, getConfig().getString("luckperms.group", "default"))
-            .orTimeout(10, TimeUnit.SECONDS).whenComplete((unused, error) -> {
-                if (Bukkit.isStopping() || !isEnabled()) { clearPending(entry); return; }
+            .orTimeout(10, TimeUnit.SECONDS)
+            .thenCompose(unused -> roster.acquire(entry, true))
+            .whenComplete((claim, error) -> {
+                boolean acquired = error == null && claim.status() == Roster.Claim.ACQUIRED;
+                Runnable cancel = () -> {
+                    clearPending(entry);
+                    if (acquired) releaseLease(entry);
+                };
+                if (Bukkit.isStopping() || !isEnabled()) { cancel.run(); return; }
                 boolean queued = owner.getScheduler().execute(this, () -> {
-                    if (error != null || !allowed(owner, entry)) {
-                        clearPending(entry);
-                        if (error == null) return;
-                        getLogger().log(Level.WARNING, "Could not prepare LuckPerms for " + entry.profile(), error);
-                        msg(owner, "spawn-failed");
+                    if (error != null) {
+                        cancel.run();
+                        getLogger().log(Level.WARNING, "Could not prepare " + entry.profile() + " for summoning", error);
+                        msg(owner, "spawn_failed");
                         return;
                     }
+                    switch (claim.status()) {
+                        case MISSING -> { clearPending(entry); msg(owner, "not_found"); return; }
+                        case HELD -> { clearPending(entry); msg(owner, "remote_busy", "server", serverLabel(claim.holder())); return; }
+                        default -> { }
+                    }
+                    if (!allowed(owner, entry)) { cancel.run(); return; }
+                    Location position = owner.getLocation();
                     if (Bukkit.isOwnedByCurrentRegion(position)) finishSummon(owner, entry, position, tier);
                     else Bukkit.getRegionScheduler().execute(this, position, () -> finishSummon(owner, entry, position, tier));
-                }, () -> clearPending(entry), 1);
-                if (!queued) clearPending(entry);
+                }, cancel, 1);
+                if (!queued) cancel.run();
             });
     }
 
@@ -367,28 +508,45 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
     }
 
     private void finishSummon(Player owner, Roster.Entry entry, Location position, DummyTier tier) {
+        boolean spawned = false;
         try {
             synchronized (admissions) {
                 if (Bukkit.isStopping() || !isEnabled() || !pending.contains(entry.id)
                     || roster.entries.get(entry.key) != entry) return;
             }
-            if (owner.isOnline()) spawnWithFee(owner, entry, position, tier);
-        } finally { clearPending(entry); }
+            if (!owner.isOnline()) return;
+            spawned = tier == null ? spawnTransferred(owner, entry, position) : spawnWithFee(owner, entry, position, tier);
+        } finally {
+            clearPending(entry);
+            if (!spawned) releaseLease(entry);
+        }
     }
 
-    private void spawnWithFee(Player player, Roster.Entry entry, Location position, DummyTier tier) {
+    private boolean spawnTransferred(Player player, Roster.Entry entry, Location position) {
+        try { spawn(entry, position); }
+        catch (RuntimeException | LinkageError problem) {
+            getLogger().log(Level.SEVERE, "Could not spawn transferred " + entry.profile(), problem);
+            msg(player, "spawn_failed");
+            return false;
+        }
+        roster.save();
+        msg(player, "bring_done", "slot", entry.key.slot());
+        return true;
+    }
+
+    private boolean spawnWithFee(Player player, Roster.Entry entry, Location position, DummyTier tier) {
         SpawnFee fee = null;
         double price = tierPrices.get(tier);
         String cost = BigDecimal.valueOf(price).stripTrailingZeros().toPlainString();
         if (paidSummoning && price > 0) {
             try {
                 fee = SpawnFee.find(price);
-                if (fee == null) { msg(player, "economy-unavailable"); return; }
-                if (!fee.debit(player)) { msg(player, "economy-declined", "price", cost); return; }
+                if (fee == null) { msg(player, "economy_unavailable"); return false; }
+                if (!fee.debit(player)) { msg(player, "economy_declined", "price", cost); return false; }
             } catch (ReflectiveOperationException | RuntimeException | LinkageError problem) {
                 getLogger().log(Level.WARNING, "Vault rejected charge for " + player.getUniqueId(), problem);
-                msg(player, "economy-unavailable");
-                return;
+                msg(player, "economy_unavailable");
+                return false;
             }
         }
         DummyTier previousTier = entry.tier;
@@ -400,25 +558,26 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
             roster.dirty(entry);
             roster.save();
             getLogger().log(Level.SEVERE, "Could not spawn " + entry.profile(), problem);
-            msg(player, "spawn-failed");
+            msg(player, "spawn_failed");
             if (fee != null) refund(player, fee, cost);
-            return;
+            return false;
         }
         roster.save();
         msg(player, "spawned", "name", entry.name(), "slot", entry.key.slot(),
-            "tier", messages.getString("tier-name." + tier.key, tier.key),
+            "tier", messages.getString("tier_name." + tier.key, tier.key),
             "chunks", tierViewDistances.get(tier) * 2 + 1);
-        if (fee != null) msg(player, "economy-paid", "price", cost);
+        if (fee != null) msg(player, "economy_paid", "price", cost);
+        return true;
     }
 
     private void refund(Player player, SpawnFee fee, String cost) {
         try {
-            if (fee.refund(player)) { msg(player, "economy-refunded", "price", cost); return; }
+            if (fee.refund(player)) { msg(player, "economy_refunded", "price", cost); return; }
         } catch (ReflectiveOperationException | RuntimeException | LinkageError problem) {
             getLogger().log(Level.SEVERE, "Vault refund threw for " + player.getUniqueId(), problem);
         }
         getLogger().severe("Manual refund required: " + player.getUniqueId() + ", amount " + cost);
-        msg(player, "economy-refund-failed", "price", cost);
+        msg(player, "economy_refund_failed", "price", cost);
     }
 
     void spawn(Roster.Entry entry, Location position) {
@@ -444,6 +603,7 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
             dummy.setYHeadRot(yaw);
             Player player = dummy.getBukkitEntity();
             player.setPersistent(false);
+            player.setAffectsSpawning(affectsSpawning);
             int dummyViewDistance = tierViewDistances.getOrDefault(entry.tier, 2);
             player.setViewDistance(dummyViewDistance);
             player.setSimulationDistance(Math.min(simulationDistance, dummyViewDistance));
@@ -465,10 +625,10 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
             }, () -> {
                 active.inWorld = false;
                 active.hiddenTag.clear();
-                live.remove(entry.id, active);
+                if (live.remove(entry.id, active)) releaseLease(entry);
             }, 1, 1);
         } catch (RuntimeException | LinkageError error) {
-            unlink(active, false);
+            discard(active);
             throw error;
         }
     }
@@ -488,15 +648,23 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
             try {
                 if (active.dummy.isAlive()) active.actions.tick(tick, this);
                 if (tick % 100 == 0) applyName(active);
-                if ((tick + active.actions.offset) % saveInterval == 0
-                    || (tick + active.actions.offset) % 10 == 0 && menus.watching(active.entry)) snapshot(active);
+                int phase = tick + active.actions.offset;
+                if (phase % saveInterval == 0) {
+                    // 快照后立即排队写入（只写有变化的数据），崩溃时最多丢失一个保存间隔的变更
+                    snapshot(active);
+                    roster.save();
+                } else if (phase % 10 == 0 && menus.watching(active.entry)) snapshot(active);
             } catch (RuntimeException | LinkageError error) {
                 getLogger().log(Level.SEVERE, "Disabling broken session " + active.entry.profile(), error);
                 unlink(active, true);
             }
     }
 
+    // ══ 背包 ══════════════════════════════════════════════
+
+    /** 本服持有租约，且在线假人位于当前线程所在区域时才能修改背包。 */
     boolean editable(Roster.Entry entry) {
+        if (!roster.holds(entry)) return false;
         Live active = live.get(entry.id);
         return active == null || active.dead || !active.relocating && Bukkit.isOwnedByCurrentRegion(active.dummy.getBukkitEntity());
     }
@@ -550,14 +718,68 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
         }
     }
 
+    /** 设置被修改：写入数据库；假人在其他子服运行时，同时转发给该子服。 */
+    void settingsChanged(Roster.Entry entry) {
+        roster.dirty(entry);
+        roster.save();
+        entry.wakeWork();
+        String holder = roster.remoteHolder(entry);
+        if (holder != null) network.send(holder, "settings", settingsJson(entry, null));
+    }
+
+    /** 假人在其他子服运行时，把新的工作方向转发过去。 */
+    boolean forwardDirection(Roster.Entry entry, float yaw) {
+        String holder = roster.remoteHolder(entry);
+        if (holder == null) return false;
+        entry.workYaw = yaw;
+        entry.directionSet = true;
+        roster.dirty(entry);
+        roster.save();
+        network.send(holder, "settings", settingsJson(entry, yaw));
+        return true;
+    }
+
+    private static JsonObject settingsJson(Roster.Entry entry, Float yaw) {
+        var body = new JsonObject();
+        body.addProperty("dummy", entry.id.toString());
+        body.addProperty("alias", entry.alias);
+        body.addProperty("mine", entry.mine);
+        body.addProperty("attack", entry.attack);
+        body.addProperty("use", entry.use);
+        body.addProperty("unload", entry.autoUnload);
+        body.addProperty("pushable", entry.pushable);
+        body.addProperty("sneak", entry.sneaking);
+        body.addProperty("interval", entry.attackIntervalTicks);
+        body.addProperty("placement", entry.placementBlock == null ? "" : entry.placementBlock.getKey().toString());
+        if (yaw != null) body.addProperty("yaw", yaw);
+        return body;
+    }
+
     void prepareRelocation(Live active) {
         active.actions.stopMining();
         active.entry.wakeWork();
         active.relocating = true;
     }
 
-    void unlink(Live active, boolean keep) {
+    // ══ 收回与租约 ═════════════════════════════════════════
+
+    /** 移除假人实体并释放租约；keep 为 true 时先保存背包。结果在租约释放（数据写入）后完成。 */
+    CompletableFuture<Void> unlink(Live active, boolean keep) {
         if (keep) snapshot(active);
+        try { detach(active); }
+        finally {
+            if (live.remove(active.entry.id, active)) active.released = releaseLease(active.entry);
+        }
+        return active.released;
+    }
+
+    /** 移除实体但不保存、不释放租约：用于租约已被其他子服接管或假人已被删除。 */
+    private void discard(Live active) {
+        try { detach(active); }
+        finally { live.remove(active.entry.id, active); }
+    }
+
+    private void detach(Live active) {
         active.hiddenTag.clear();
         active.inWorld = false;
         try {
@@ -567,12 +789,134 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
             }
         } finally {
             try { folia.detach(active.dummy); }
-            finally {
-                active.dummy.link.dispose();
-                live.remove(active.entry.id, active);
-            }
+            finally { active.dummy.link.dispose(); }
         }
     }
+
+    /** 假人离开本服后的租约处理：背包编辑界面仍打开时降为编辑租约，否则释放。 */
+    CompletableFuture<Void> releaseLease(Roster.Entry entry) {
+        if (!shuttingDown && menus.editing(entry)) {
+            roster.downgrade(entry);
+            return CompletableFuture.completedFuture(null);
+        }
+        return roster.release(entry, false);
+    }
+
+    /** 存储线程回调：租约变更后通知其他子服。live 为 null 表示已释放。 */
+    void sessionChanged(UUID dummy, Boolean liveNow) {
+        if (network == null || !network.enabled()) return;
+        var body = new JsonObject();
+        body.addProperty("dummy", dummy.toString());
+        body.addProperty("live", Boolean.TRUE.equals(liveNow));
+        network.broadcast("session", body);
+    }
+
+    /** 存储线程回调：假人已在其他子服被删除。 */
+    void entryRemoved(Roster.Entry entry) {
+        synchronized (admissions) { pending.remove(entry.id); }
+        if (menus != null) menus.close(entry);
+        Live active = live.get(entry.id);
+        if (active != null) active.dummy.getBukkitEntity().getScheduler().execute(this,
+            () -> { if (live.get(entry.id) == active) discard(active); }, null, 1);
+    }
+
+    /** 存储线程回调：本服失联期间租约被其他子服接管，本地副本直接移除且不保存，防止复制物品。 */
+    void leaseLost(Roster.Entry entry) {
+        getLogger().warning("Another server took over " + entry.profile() + "; removing the local copy without saving.");
+        menus.close(entry);
+        Live active = live.get(entry.id);
+        if (active != null) active.dummy.getBukkitEntity().getScheduler().execute(this,
+            () -> { if (live.get(entry.id) == active) discard(active); }, null, 1);
+    }
+
+    private void invalidate(UUID owner) {
+        if (!network.enabled()) return;
+        var body = new JsonObject();
+        body.addProperty("owner", owner.toString());
+        network.broadcast("invalidate", body);
+    }
+
+    // ══ 跨服消息 ═══════════════════════════════════════════
+
+    private void handleRemote(String type, String from, JsonObject body, Consumer<JsonObject> reply) {
+        switch (type) {
+            case "invalidate" -> roster.reloadOwner(uuid(body, "owner")).exceptionally(error -> {
+                getLogger().log(Level.WARNING, "Could not refresh fake players after a cross-server change", error);
+                return null;
+            });
+            case "session" -> roster.remoteSession(uuid(body, "dummy"), from, body.get("live").getAsBoolean());
+            case "release" -> remoteRelease(uuid(body, "dummy"), body.get("mode").getAsString(), reply);
+            case "settings" -> remoteSettings(uuid(body, "dummy"), body);
+            case "arrival" -> teleports.expect(uuid(body, "player"), uuid(body, "dummy"));
+            case "clear" -> Bukkit.getGlobalRegionScheduler().execute(this, this::clearLocal);
+            case "purchase_items" -> roster.reloadPurchaseItems().thenAccept(items -> {
+                var current = purchasePrice;
+                purchasePrice = new PurchasePrice(current.coins(), current.points(), items);
+            });
+            default -> { }
+        }
+    }
+
+    private static UUID uuid(JsonObject body, String key) { return UUID.fromString(body.get(key).getAsString()); }
+
+    private static JsonObject result(boolean ok) {
+        var body = new JsonObject();
+        body.addProperty("ok", ok);
+        return body;
+    }
+
+    /** 其他子服请求本服收回假人（召回、收回、删除）。数据写入并释放租约后才回复。 */
+    private void remoteRelease(UUID id, String mode, Consumer<JsonObject> reply) {
+        Roster.Entry entry = roster.byId.get(id);
+        if (entry == null) { reply.accept(result(true)); return; }
+        Runnable releaseOnly = () -> {
+            menus.close(entry);
+            roster.release(entry, false).whenComplete((unused, error) -> reply.accept(result(error == null)));
+        };
+        Live active = live.get(id);
+        if (active == null) { releaseOnly.run(); return; }
+        boolean keep = !mode.equals("delete");
+        if (!active.dummy.getBukkitEntity().getScheduler().execute(this, () -> {
+            if (live.get(id) != active) { releaseOnly.run(); return; }
+            CompletableFuture<Void> unlinked = unlink(active, keep);
+            menus.close(entry);
+            CompletableFuture.allOf(unlinked, roster.release(entry, false))
+                .whenComplete((unused, error) -> reply.accept(result(error == null)));
+            roster.save();
+        }, releaseOnly, 1)) releaseOnly.run();
+    }
+
+    /** 其他子服修改了在本服运行的假人的设置。 */
+    private void remoteSettings(UUID id, JsonObject body) {
+        Roster.Entry entry = roster.byId.get(id);
+        if (entry == null || !roster.holds(entry)) return;
+        entry.alias = body.get("alias").getAsString();
+        entry.mine = body.get("mine").getAsBoolean();
+        entry.attack = body.get("attack").getAsBoolean();
+        entry.use = body.get("use").getAsBoolean();
+        entry.autoUnload = body.get("unload").getAsBoolean();
+        entry.pushable = body.get("pushable").getAsBoolean();
+        entry.sneaking = body.get("sneak").getAsBoolean();
+        entry.attackIntervalTicks = Math.clamp(body.get("interval").getAsInt(), 20, 200);
+        String placement = body.get("placement").getAsString();
+        entry.placementBlock = placement.isEmpty() ? null : Material.matchMaterial(placement);
+        roster.dirty(entry);
+        roster.save();
+        entry.wakeWork();
+        Live active = live.get(id);
+        if (active == null) return;
+        active.dummy.getBukkitEntity().getScheduler().execute(this, () -> {
+            if (live.get(id) != active || active.dead) return;
+            if (body.has("yaw")) {
+                float yaw = body.get("yaw").getAsFloat();
+                active.actions.direction(yaw);
+                saveDirection(entry, yaw);
+            }
+            applyName(active);
+        }, null, 1);
+    }
+
+    // ══ 事件 ══════════════════════════════════════════════
 
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
     public void onPickup(EntityPickupItemEvent event) {
@@ -637,31 +981,67 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
         }, null, 1);
     }
 
+    @EventHandler(priority = EventPriority.MONITOR) public void onJoin(PlayerJoinEvent event) {
+        Player player = event.getPlayer();
+        benchmark.join(player);
+        live.values().forEach(active -> showDummy(active, player));
+        if (network.enabled() && !fake(player)) {
+            // 玩家可能刚从其他子服过来，重新读取他的假人
+            roster.reloadOwner(player.getUniqueId()).exceptionally(error -> {
+                getLogger().log(Level.WARNING, "Could not refresh fake players of " + player.getName(), error);
+                return null;
+            });
+            teleports.arrived(player);
+        }
+    }
+
+    private void showDummy(Live active, Player player) {
+        if (active.inWorld && !active.dead && player instanceof CraftPlayer viewer && !(viewer.getHandle() instanceof NativeDummy)) {
+            active.hiddenTag.showTo(active.dummy, viewer.getHandle());
+        }
+    }
+
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void onTrackDummy(PlayerTrackEntityEvent event) {
+        if (!(event.getEntity() instanceof CraftPlayer tracked) || !(tracked.getHandle() instanceof NativeDummy dummy)
+            || !(event.getPlayer() instanceof CraftPlayer viewer) || viewer.getHandle() instanceof NativeDummy) return;
+        Live active = live.get(dummy.getUUID());
+        if (active != null && active.dummy == dummy && !active.dead) active.hiddenTag.showTo(dummy, viewer.getHandle());
+    }
+
+    @EventHandler public void onViewerQuit(PlayerQuitEvent event) {
+        benchmark.quit(event.getPlayer());
+        UUID viewer = event.getPlayer().getUniqueId();
+        live.values().forEach(active -> active.hiddenTag.forget(viewer));
+    }
+
+    // ══ 改名卡 ════════════════════════════════════════════
+
     private void rename(Player player, int slot, String name) {
         Roster.Key key = new Roster.Key(player.getUniqueId(), slot);
         Roster.Entry entry = roster.entries.get(key);
-        if (entry == null) { msg(player, "rename-not-found"); return; }
+        if (entry == null) { msg(player, "rename_not_found"); return; }
         if (!name.matches("[A-Za-z0-9_]{1,16}") || Bukkit.getPlayerExact(name) != null || Bukkit.getOfflinePlayerIfCached(name) != null
             || name.matches("[0-9]+") || name.equalsIgnoreCase("all") || name.regionMatches(true, 0, "AFP_", 0, 4)
             || name.regionMatches(true, 0, "AFP~", 0, 4)) {
-            msg(player, "bad-name"); return;
+            msg(player, "bad_name"); return;
         }
         synchronized (roster) {
-            if (roster.entries.get(key) != entry) { msg(player, "rename-not-found"); return; }
+            if (roster.entries.get(key) != entry) { msg(player, "rename_not_found"); return; }
             if (entry.name().equals(name) || roster.entries.values().stream().anyMatch(other -> other != entry && other.matchesName(name))) {
-                msg(player, "bad-name"); return;
+                msg(player, "bad_name"); return;
             }
-            if (!consumeRenameCard(player)) { msg(player, "rename-card-required"); return; }
+            if (!consumeRenameCard(player)) { msg(player, "rename_card_required"); return; }
             entry.alias = name;
-            roster.dirty(entry);
-            roster.save();
         }
+        settingsChanged(entry);
+        roster.commit().thenRun(() -> invalidate(entry.key.owner()));
         Live active = live.get(entry.id);
         if (active != null) active.dummy.getBukkitEntity().getScheduler().execute(this, () -> {
             if (!active.dead && live.get(entry.id) == active) applyName(active);
         }, null, 1);
         msg(player, "renamed", "name", name);
-        if (active != null) msg(player, "rename-resummon");
+        if (active != null || roster.remoteHolder(entry) != null) msg(player, "rename_resummon");
     }
 
     private boolean consumeRenameCard(Player player) {
@@ -685,23 +1065,23 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
     }
 
     private void giveRenameCards(CommandSender sender, String[] args) {
-        if (!sender.hasPermission(ADMIN)) { msg(sender, "no-permission"); return; }
+        if (!sender.hasPermission(ADMIN)) { msg(sender, "no_permission"); return; }
         int amount = args.length == 2 ? 1 : args.length == 3 ? integer(args[2]) : -1;
-        if (amount < 1 || amount > 64) { msg(sender, "givecard-help"); return; }
+        if (amount < 1 || amount > 64) { msg(sender, "givecard_help"); return; }
         Player target = Bukkit.getPlayerExact(args[1]);
-        if (target == null || fake(target)) { msg(sender, "givecard-offline"); return; }
-        Runnable offline = () -> msg(sender, "givecard-offline");
+        if (target == null || fake(target)) { msg(sender, "givecard_offline"); return; }
+        Runnable offline = () -> msg(sender, "givecard_offline");
         if (!target.getScheduler().execute(this, () -> {
             if (!target.isOnline()) { offline.run(); return; }
             ItemStack card = ItemStack.of(Material.PAPER, amount);
             card.editMeta(meta -> {
-                meta.displayName(itemText(messages.getString("rename-card.name", "&6黑奴改名卡")));
-                meta.lore(messages.getStringList("rename-card.lore").stream().map(DummyPlayers::itemText).toList());
+                meta.displayName(itemText(messages.getString("rename_card.name", "&6黑奴改名卡")));
+                meta.lore(messages.getStringList("rename_card.lore").stream().map(DummyPlayers::itemText).toList());
                 meta.getPersistentDataContainer().set(RENAME_CARD, PersistentDataType.BYTE, (byte) 1);
             });
             int leftover = target.getInventory().addItem(card).values().stream().mapToInt(ItemStack::getAmount).sum();
-            if (leftover < amount) msg(sender, "givecard-done", "player", target.getName(), "amount", amount - leftover);
-            if (leftover > 0) msg(sender, "givecard-full", "amount", leftover);
+            if (leftover < amount) msg(sender, "givecard_done", "player", target.getName(), "amount", amount - leftover);
+            if (leftover > 0) msg(sender, "givecard_full", "amount", leftover);
         }, offline, 1)) offline.run();
     }
 
@@ -709,233 +1089,338 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
         return TEXT.deserialize(value).decorationIfAbsent(TextDecoration.ITALIC, TextDecoration.State.FALSE);
     }
 
-    @EventHandler(priority = EventPriority.MONITOR) public void onJoin(PlayerJoinEvent event) {
-        benchmark.join(event.getPlayer());
-        live.values().forEach(active -> showDummy(active, event.getPlayer()));
-    }
-
-    private void showDummy(Live active, Player player) {
-        if (active.inWorld && !active.dead && player instanceof CraftPlayer viewer && !(viewer.getHandle() instanceof NativeDummy)) {
-            active.hiddenTag.showTo(active.dummy, viewer.getHandle());
-        }
-    }
-
-    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
-    public void onTrackDummy(PlayerTrackEntityEvent event) {
-        if (!(event.getEntity() instanceof CraftPlayer tracked) || !(tracked.getHandle() instanceof NativeDummy dummy)
-            || !(event.getPlayer() instanceof CraftPlayer viewer) || viewer.getHandle() instanceof NativeDummy) return;
-        Live active = live.get(dummy.getUUID());
-        if (active != null && active.dummy == dummy && !active.dead) active.hiddenTag.showTo(dummy, viewer.getHandle());
-    }
-
-    @EventHandler public void onViewerQuit(PlayerQuitEvent event) {
-        benchmark.quit(event.getPlayer());
-        UUID viewer = event.getPlayer().getUniqueId();
-        live.values().forEach(active -> active.hiddenTag.forget(viewer));
-    }
+    // ══ 指令 ══════════════════════════════════════════════
 
     @Override public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
         if (fake(sender)) return true;
-        String action = args.length == 0 ? sender instanceof Player ? "menu" : "help" : args[0].toLowerCase(Locale.ROOT);
         boolean admin = sender.hasPermission(ADMIN);
-        if (action.equals("benchmark")) {
-            if (!admin) msg(sender, "no-permission");
-            else benchmark.command(sender, args);
+        if (args.length == 0) {
+            if (sender instanceof Player player && player.hasPermission(USE)) rosterMenus.openMain(player, 0);
+            else sendHelp(sender);
             return true;
         }
-        if (action.equals("givecard")) { giveRenameCards(sender, args); return true; }
-        if (action.equals("purchaseitems")) {
-            if (admin && sender instanceof Player player) rosterMenus.openPurchaseItems(player);
-            else msg(sender, "no-permission");
-            return true;
-        }
-        if (action.equals("grant") || action.equals("setslots")) {
-            if (!admin) { msg(sender, "no-permission"); return true; }
-            UUID owner = args.length >= 2 ? owner(args[1]) : null;
-            int amount = args.length == 3 ? integer(args[2]) : -1;
-            if (owner == null || amount < (action.equals("grant") ? 1 : 0) || amount > maxSlots) { msg(sender, "grant-help"); return true; }
-            int total;
-            synchronized (roster) {
-                int owned = (int) roster.entries.keySet().stream().filter(key -> key.owner().equals(owner)).count();
-                int target = action.equals("grant") ? Math.min(maxSlots, owned + amount) : Math.max(owned, amount);
-                for (int number = 1; number <= maxSlots && owned < target; number++) {
-                    var key = new Roster.Key(owner, number);
-                    if (roster.entries.containsKey(key)) continue;
-                    if (number > slots(owner)) roster.setAllowance(owner, number);
-                    roster.create(key);
-                    owned++;
-                }
-                total = owned;
-                roster.save();
-            }
-            msg(sender, "granted", "name", args[1], "slots", total);
-            return true;
-        }
-        if (action.equals("deleteall") || action.equals("删除全部")) {
-            if (!admin) msg(sender, "no-permission");
-            else if (args.length != 2 || !args[1].equalsIgnoreCase("confirm")) msg(sender, "deleteall-help");
-            else {
-                int queued = 0;
-                for (Live active : live.values()) {
-                    if (!isSummoned(active)) continue;
-                    boolean scheduled = active.dummy.getBukkitEntity().getScheduler().execute(this, () -> {
-                        if (live.get(active.entry.id) != active || !isSummoned(active)) return;
-                        unlink(active, true);
-                        roster.save();
-                    }, null, 1);
-                    if (scheduled) queued++;
-                }
-                msg(sender, "despawn-all-queued", "count", queued);
-            }
-            return true;
-        }
-        if (action.equals("delete") || action.equals("kill") || action.equals("删除")) {
-            if (!admin && (!(sender instanceof Player player) || !player.hasPermission(USE))) { msg(sender, "no-permission"); return true; }
-            if (args.length < 2) { msg(sender, "delete-help"); return true; }
-            String target = String.join(" ", Arrays.copyOfRange(args, 1, args.length));
-            UUID owner = sender instanceof Player player ? player.getUniqueId() : null;
-            int slot = integer(target);
-            Roster.Entry entry = slot > 0 ? owner == null ? null : roster.entries.get(new Roster.Key(owner, slot))
-                : roster.entries.values().stream().filter(bot -> (admin || bot.key.owner().equals(owner))
-                    && bot.matchesName(target)).findFirst().orElse(null);
-            if (entry == null) { msg(sender, "not-found"); return true; }
-            if (action.equals("kill")) {
-                Live active = live.get(entry.id);
-                if (!isSummoned(active) || !active.dummy.getBukkitEntity().getScheduler().execute(this, () -> {
-                    if (live.get(entry.id) != active || !isSummoned(active)) return;
-                    unlink(active, true);
-                    roster.save();
-                }, null, 1)) msg(sender, "despawn-offline");
-                else msg(sender, "despawn-all-queued", "count", 1);
+        String action = args[0].toLowerCase(Locale.ROOT);
+        // 管理员与通用指令（游戏内或后台）
+        switch (action) {
+            case "help" -> { sendHelp(sender); return true; }
+            case "admin" -> { sendAdminHelp(sender); return true; }
+            case "despawn" -> { despawnCommand(sender, admin, args); return true; }
+            case "delete" -> { deleteCommand(sender, admin, args); return true; }
+            case "grant", "set" -> { grantCommand(sender, admin, action.equals("set"), args); return true; }
+            case "card" -> { giveRenameCards(sender, args); return true; }
+            case "items" -> {
+                if (!admin) msg(sender, "no_permission");
+                else if (sender instanceof Player player) rosterMenus.openPurchaseItems(player);
+                else msg(sender, "player_only");
                 return true;
             }
-            delete(entry);
-            roster.save();
-            msg(sender, "deleted", "name", entry.name());
-            return true;
-        }
-        if (action.equals("help")) {
-            sendHelp(sender);
-            return true;
-        }
-        if (!(sender instanceof Player player)) { msg(sender, "player-only"); return true; }
-        if (!player.hasPermission(USE)) { msg(sender, "no-permission"); return true; }
-        if (action.equals("menu")) { rosterMenus.openMain(player, 0); return true; }
-        if (action.equals("despawn")) {
-            int slot = args.length == 1 ? 1 : args.length == 2 ? integer(args[1]) : -1;
-            if (slot < 1) { msg(player, "despawn-help"); return true; }
-            Roster.Entry entry = roster.entries.get(new Roster.Key(player.getUniqueId(), slot));
-            Live active = entry == null ? null : live.get(entry.id);
-            if (active == null || !summoned(entry) || !allowed(player, entry)) {
-                msg(player, "despawn-offline");
+            case "clear" -> { clearCommand(sender, admin, args); return true; }
+            case "servers" -> { listServers(sender, admin); return true; }
+            case "test" -> {
+                if (!admin) msg(sender, "no_permission");
+                else benchmark.command(sender, args);
                 return true;
             }
-            Runnable offline = () -> player.getScheduler().execute(this, () -> msg(player, "despawn-offline"), null, 1);
+            default -> { }
+        }
+        // 玩家指令（游戏内）；未知指令显示帮助
+        if (!PLAYER_ACTIONS.contains(action)) { sendHelp(sender); return true; }
+        if (!(sender instanceof Player player)) { msg(sender, "player_only"); return true; }
+        if (!player.hasPermission(USE)) { msg(sender, "no_permission"); return true; }
+        switch (action) {
+            case "spawn" -> spawnCommand(player, args);
+            case "list" -> listCommand(player);
+            case "b" -> {
+                int slot = args.length == 2 ? integer(args[1]) : -1;
+                if (slot < 1) { msg(player, "inventory_help"); break; }
+                if (!unlocked(player, slot)) break;
+                Roster.Entry entry = roster.entries.get(new Roster.Key(player.getUniqueId(), slot));
+                if (entry == null) msg(player, "not_found");
+                else menus.open(player, entry, "inventory");
+            }
+            case "dir" -> directionCommand(player, args);
+            case "rename" -> {
+                int slot = args.length >= 3 ? integer(args[1]) : -1;
+                if (slot < 1) msg(player, "rename_help");
+                else rename(player, slot, String.join(" ", Arrays.copyOfRange(args, 2, args.length)).strip());
+            }
+            case "tp", "tph" -> teleportCommand(player, action.equals("tph"), args);
+            default -> { }
+        }
+        return true;
+    }
+
+    private boolean unlocked(Player player, int slot) {
+        int slots = slots(player.getUniqueId());
+        if (slot <= slots) return true;
+        msg(player, "locked", "slots", slots);
+        return false;
+    }
+
+    /** spawn [编号] [normal|pro|promax]；只写等级时召唤 1 号。 */
+    private void spawnCommand(Player player, String[] args) {
+        if (args.length > 3) { msg(player, "spawn_help"); return; }
+        int slot = 1;
+        DummyTier tier = null;
+        if (args.length >= 2) {
+            DummyTier named = args.length == 2 ? DummyTier.fromName(args[1]) : null;
+            if (named != null) tier = named;
+            else slot = integer(args[1]);
+        }
+        if (args.length == 3) {
+            tier = DummyTier.fromName(args[2]);
+            if (tier == null) { msg(player, "spawn_help"); return; }
+        }
+        if (slot < 1) { msg(player, "spawn_help"); return; }
+        if (unlocked(player, slot)) summon(player, slot, tier);
+    }
+
+    private void listCommand(Player player) {
+        msg(player, "slots", "slots", slots(player.getUniqueId()));
+        for (Roster.Entry bot : roster.owned(player.getUniqueId())) {
+            String remote = roster.remoteHolder(bot);
+            if (summoned(bot)) msg(player, "list_live", "name", bot.name(), "slot", bot.key.slot());
+            else if (remote != null) msg(player, "list_remote", "name", bot.name(), "slot", bot.key.slot(), "server", serverLabel(remote));
+            else msg(player, "list_offline", "name", bot.name(), "slot", bot.key.slot());
+        }
+    }
+
+    private void directionCommand(Player player, String[] args) {
+        int slot = args.length == 2 ? integer(args[1]) : -1;
+        if (slot < 1) { msg(player, "direction_help"); return; }
+        if (!unlocked(player, slot)) return;
+        Roster.Entry entry = roster.entries.get(new Roster.Key(player.getUniqueId(), slot));
+        Live active = entry == null ? null : live.get(entry.id);
+        float yaw = player.getLocation().getYaw();
+        if (active == null || active.dead) {
+            if (entry != null && forwardDirection(entry, yaw)) msg(player, "direction_set", "slot", slot);
+            else msg(player, "direction_offline");
+            return;
+        }
+        active.dummy.getBukkitEntity().getScheduler().execute(this, () -> {
+            if (active.dead || live.get(entry.id) != active) return;
+            active.actions.direction(yaw);
+            saveDirection(entry, yaw);
+            player.getScheduler().execute(this, () -> msg(player, "direction_set", "slot", slot), null, 1);
+        }, null, 1);
+    }
+
+    /** tp / tph <编号或名字>。 */
+    private void teleportCommand(Player player, boolean bring, String[] args) {
+        String target = String.join(" ", Arrays.copyOfRange(args, 1, args.length)).strip();
+        int slot = integer(target);
+        if (slot < 1 && !target.isEmpty()) slot = roster.owned(player.getUniqueId()).stream()
+            .filter(entry -> allowed(player, entry) && entry.matchesName(target))
+            .mapToInt(entry -> entry.key.slot()).findFirst().orElse(-1);
+        if (!player.hasPermission(TELEPORT)) msg(player, "no_permission");
+        else if (slot < 1) msg(player, bring ? "bring_help" : "teleport_help");
+        else teleports.request(player, slot, bring);
+    }
+
+    /** 按编号（只找自己的）或名字（管理员可找任意玩家的）查找假人。 */
+    private Roster.Entry find(Player player, boolean admin, String target) {
+        int slot = integer(target);
+        if (slot > 0) return player == null ? null : roster.entries.get(new Roster.Key(player.getUniqueId(), slot));
+        UUID owner = player == null ? null : player.getUniqueId();
+        return roster.entries.values().stream()
+            .filter(bot -> (admin || bot.key.owner().equals(owner)) && bot.matchesName(target))
+            .min(Comparator.comparing(bot -> !bot.key.owner().equals(owner))).orElse(null);
+    }
+
+    /** despawn [编号或名字]：玩家收回自己的假人；管理员可按名字收回任意玩家的假人（包括其他子服）。 */
+    private void despawnCommand(CommandSender sender, boolean admin, String[] args) {
+        Player player = sender instanceof Player p && p.hasPermission(USE) ? p : null;
+        if (player == null && !admin) { msg(sender, "no_permission"); return; }
+        String target = String.join(" ", Arrays.copyOfRange(args, 1, args.length)).strip();
+        if (target.isEmpty() && player == null) { msg(sender, "despawn_help"); return; }
+        Roster.Entry entry = find(player, admin, target.isEmpty() ? "1" : target);
+        if (entry == null) { msg(sender, "not_found"); return; }
+        if (player != null && entry.key.owner().equals(player.getUniqueId())) {
+            if (!allowed(player, entry)) msg(player, "despawn_offline");
+            else despawn(player, entry, () -> msg(player, "despawn_done", "name", entry.name()));
+        } else kill(sender, entry);
+    }
+
+    /** delete <编号或名字>：玩家删除自己的假人；管理员可按名字删除任意玩家的假人。 */
+    private void deleteCommand(CommandSender sender, boolean admin, String[] args) {
+        Player player = sender instanceof Player p && p.hasPermission(USE) ? p : null;
+        if (player == null && !admin) { msg(sender, "no_permission"); return; }
+        String target = String.join(" ", Arrays.copyOfRange(args, 1, args.length)).strip();
+        if (target.isEmpty()) { msg(sender, "delete_help"); return; }
+        Roster.Entry entry = find(player, admin, target);
+        if (entry == null) msg(sender, "not_found");
+        else deleteEverywhere(sender, entry);
+    }
+
+    /** grant <玩家> <数量>：增加；set <玩家> <总数>：补到指定总数。 */
+    private void grantCommand(CommandSender sender, boolean admin, boolean setTotal, String[] args) {
+        if (!admin) { msg(sender, "no_permission"); return; }
+        UUID owner = args.length >= 2 ? owner(args[1]) : null;
+        int amount = args.length == 3 ? integer(args[2]) : -1;
+        if (owner == null || amount < (setTotal ? 0 : 1) || amount > maxSlots) { msg(sender, "grant_help"); return; }
+        String name = args[1];
+        roster.grant(owner, amount, setTotal, maxSlots, baseSlots).whenComplete((total, error) -> {
+            if (error != null) {
+                getLogger().log(Level.WARNING, "Could not grant fake players", error);
+                tell(sender, () -> msg(sender, "storage_error"));
+                return;
+            }
+            invalidate(owner);
+            tell(sender, () -> msg(sender, "granted", "name", name, "slots", total));
+        });
+    }
+
+    /** 收回自己的假人：本服直接移除，其他子服则发送请求。 */
+    private void despawn(Player player, Roster.Entry entry, Runnable done) {
+        Live active = live.get(entry.id);
+        if (active != null && summoned(entry)) {
+            Runnable offline = () -> player.getScheduler().execute(this, () -> msg(player, "despawn_offline"), null, 1);
             if (!active.dummy.getBukkitEntity().getScheduler().execute(this, () -> {
                 if (live.get(entry.id) != active || !summoned(entry)) { offline.run(); return; }
                 unlink(active, true);
                 roster.save();
-                player.getScheduler().execute(this, () -> msg(player, "despawn-done", "name", entry.name()), null, 1);
+                player.getScheduler().execute(this, done, null, 1);
             }, offline, 1)) offline.run();
-            return true;
+            return;
         }
-        if (action.equals("rename")) {
-            int slot = args.length >= 3 ? integer(args[1]) : -1;
-            if (slot < 1) msg(player, "rename-help");
-            else rename(player, slot, String.join(" ", Arrays.copyOfRange(args, 2, args.length)).strip());
-            return true;
+        String holder = roster.remoteHolder(entry);
+        if (holder == null) { msg(player, "despawn_offline"); return; }
+        remoteRequest(player, entry, holder, "despawn", done);
+    }
+
+    private void remoteRequest(CommandSender sender, Roster.Entry entry, String holder, String mode, Runnable done) {
+        var body = new JsonObject();
+        body.addProperty("dummy", entry.id.toString());
+        body.addProperty("mode", mode);
+        network.request(holder, "release", body).whenComplete((reply, error) -> {
+            boolean ok = error == null && reply != null && reply.has("ok") && reply.get("ok").getAsBoolean();
+            if (ok) roster.remoteSession(entry.id, holder, false);
+            tell(sender, ok ? done : () -> msg(sender, "remote_timeout", "server", serverLabel(holder)));
+        });
+    }
+
+    /** 清除已召唤的假人（保留存档），支持其他子服。 */
+    private void kill(CommandSender sender, Roster.Entry entry) {
+        Live active = live.get(entry.id);
+        if (isSummoned(active)) {
+            if (!active.dummy.getBukkitEntity().getScheduler().execute(this, () -> {
+                if (live.get(entry.id) != active || !isSummoned(active)) return;
+                unlink(active, true);
+                roster.save();
+            }, null, 1)) msg(sender, "despawn_offline");
+            else msg(sender, "despawn_all_queued", "count", 1);
+            return;
         }
-        if (TELEPORT_ACTIONS.contains(action)) {
-            String target = String.join(" ", Arrays.copyOfRange(args, 1, args.length));
-            int slot = integer(target);
-            if (slot < 1 && !target.isBlank()) slot = roster.entries.values().stream()
-                .filter(entry -> allowed(player, entry) && entry.matchesName(target))
-                .mapToInt(entry -> entry.key.slot()).findFirst().orElse(-1);
-            boolean bring = action.equals("tph") || action.equals("bring");
-            if (!player.hasPermission(TELEPORT)) msg(player, "no-permission");
-            else if (slot < 1) msg(player, bring ? "bring-help" : "teleport-help");
-            else teleports.request(player, slot, bring);
-            return true;
+        String holder = roster.remoteHolder(entry);
+        if (holder == null) { msg(sender, "despawn_offline"); return; }
+        remoteRequest(sender, entry, holder, "despawn", () -> msg(sender, "despawn_all_queued", "count", 1));
+    }
+
+    /** 永久删除：假人在其他子服运行时，先请求对方移除（无论是否回应都会删除，对方下次保存时会自行清理）。 */
+    private void deleteEverywhere(CommandSender sender, Roster.Entry entry) {
+        String holder = roster.remoteHolder(entry);
+        if (holder == null) {
+            delete(entry);
+            msg(sender, "deleted", "name", entry.name());
+            return;
         }
-        if (action.equals("list")) {
-            msg(player, "slots", "slots", slots(player.getUniqueId()));
-            for (Roster.Entry bot : roster.entries.values()) if (bot.key.owner().equals(player.getUniqueId())) {
-                msg(player, summoned(bot) ? "list-live" : "list-offline", "name", bot.name(), "slot", bot.key.slot());
+        var body = new JsonObject();
+        body.addProperty("dummy", entry.id.toString());
+        body.addProperty("mode", "delete");
+        network.request(holder, "release", body).whenComplete((reply, error) -> tell(sender, () -> {
+            if (roster.byId.get(entry.id) != entry) return;
+            delete(entry);
+            msg(sender, "deleted", "name", entry.name());
+        }));
+    }
+
+    private void delete(Roster.Entry entry) {
+        synchronized (admissions) { pending.remove(entry.id); }
+        menus.close(entry);
+        Live active = live.get(entry.id);
+        roster.delete(entry).whenComplete((unused, error) -> {
+            if (error != null) getLogger().log(Level.SEVERE, "Could not delete " + entry.profile() + " from the database", error);
+            else invalidate(entry.key.owner());
+        });
+        if (active != null) active.dummy.getBukkitEntity().getScheduler().execute(this,
+            () -> { if (live.get(entry.id) == active) discard(active); }, null, 1);
+    }
+
+    /** clear [服务器ID|all]：清除本服、指定子服或全部子服已召唤的假人，保留存档。10 秒内输入两次才执行。 */
+    private void clearCommand(CommandSender sender, boolean admin, String[] args) {
+        if (!admin) { msg(sender, "no_permission"); return; }
+        if (args.length > 2) { msg(sender, "clear_help"); return; }
+        String target = args.length == 2 ? args[1] : serverId;
+        boolean all = target.equalsIgnoreCase("all");
+        boolean local = target.equals(serverId);
+        if (!all && !local) {
+            if (!network.enabled()) { msg(sender, "network_disabled"); return; }
+            if (roster.servers().stream().noneMatch(info -> info.id().equals(target))) {
+                msg(sender, "server_unknown", "target", target);
+                return;
             }
-            return true;
         }
-        boolean direction = action.equals("direction") || action.equals("dir");
-        DummyTier commandTier = action.equals("spawn") || action.equals("召唤") ? null : DummyTier.fromCommand(action);
-        boolean spawn = commandTier != null || action.equals("spawn") || action.equals("召唤");
-        boolean open = action.equals("b") || action.equals("open") || action.equals("背包");
-        if (action.equals("b") && args.length != 2) { sendHelp(player); return true; }
-        DummyTier requestedTier = commandTier;
-        int slot;
-        if (spawn) {
-            if (args.length > 3) { msg(player, "spawn-help"); return true; }
-            slot = 1;
-            if (action.equals("spawn") && args.length == 2) {
-                DummyTier tierArgument = DummyTier.fromName(args[1]);
-                if (tierArgument != null) requestedTier = tierArgument;
-                else slot = integer(args[1]);
-            } else if (args.length >= 2) {
-                slot = integer(args[1]);
-            }
-            if (action.equals("spawn") && args.length == 3) {
-                requestedTier = DummyTier.fromName(args[2]);
-                if (requestedTier == null) { msg(player, "spawn-help"); return true; }
-            } else if (!action.equals("spawn") && args.length == 3) {
-                msg(player, "spawn-help"); return true;
-            }
-        } else {
-            slot = open || direction ? args.length >= 2 ? integer(args[1]) : 1 : integer(action);
+        String key = (sender instanceof Player player ? player.getUniqueId().toString() : "console") + "|" + target;
+        long now = System.currentTimeMillis();
+        Long deadline = clearConfirmations.remove(key);
+        if (deadline == null || deadline < now) {
+            clearConfirmations.values().removeIf(time -> time < now);
+            clearConfirmations.put(key, now + 10_000);
+            String typed = (sender instanceof Player ? "/afp clear" : "afp clear") + (args.length == 2 ? " " + args[1] : "");
+            msg(sender, "clear_confirm", "target", all ? "all" : serverLabel(target), "command", typed);
+            return;
         }
-        if (!spawn && !open && !direction && slot < 0) { sendHelp(player); return true; }
-        if (spawn && slot < 1) { msg(player, "spawn-help"); return true; }
-        if (slot < 1 || slot > slots(player.getUniqueId())) { msg(player, "locked", "slots", slots(player.getUniqueId())); return true; }
-        if (direction) {
-            Roster.Entry entry = roster.entries.get(new Roster.Key(player.getUniqueId(), slot));
-            Live active = entry == null ? null : live.get(entry.id);
-            if (active == null || active.dead) msg(player, "direction-offline");
-            else {
-                int directionSlot = slot;
-                Location look = player.getLocation();
-                active.dummy.getBukkitEntity().getScheduler().execute(this, () -> {
-                    if (active.dead || live.get(entry.id) != active) return;
-                    active.actions.direction(look.getYaw());
-                    saveDirection(entry, look.getYaw());
-                    player.getScheduler().execute(this, () -> msg(player, "direction-set", "slot", directionSlot), null, 1);
-                }, null, 1);
-            }
-        } else if (spawn) summon(player, slot, requestedTier);
-        else {
-            Roster.Entry entry = roster.entries.get(new Roster.Key(player.getUniqueId(), slot));
-            if (entry == null) msg(player, "not-found");
-            else menus.open(player, entry, "inventory");
+        if (!all && !local) {
+            network.send(target, "clear", new JsonObject());
+            msg(sender, "despawn_all_sent", "target", serverLabel(target));
+            return;
         }
-        return true;
+        if (all && network.enabled()) {
+            network.broadcast("clear", new JsonObject());
+            msg(sender, "despawn_all_sent", "target", "all");
+        }
+        msg(sender, "despawn_all_queued", "count", clearLocal());
+    }
+
+    private int clearLocal() {
+        int queued = 0;
+        for (Live active : live.values()) {
+            if (!isSummoned(active)) continue;
+            boolean scheduled = active.dummy.getBukkitEntity().getScheduler().execute(this, () -> {
+                if (live.get(active.entry.id) != active || !isSummoned(active)) return;
+                unlink(active, true);
+                roster.save();
+            }, null, 1);
+            if (scheduled) queued++;
+        }
+        return queued;
+    }
+
+    private void listServers(CommandSender sender, boolean admin) {
+        if (!admin) { msg(sender, "no_permission"); return; }
+        if (!network.enabled()) { msg(sender, "network_disabled"); return; }
+        msg(sender, "servers_header");
+        long timeout = network.settings.timeoutMillis();
+        for (Roster.ServerInfo info : roster.servers()) {
+            boolean self = info.id().equals(serverId);
+            if (self || info.silentMillis() < timeout) {
+                msg(sender, "servers_online", "name", info.name(), "id", info.id(), "count", self ? summonedCount() : info.live());
+            } else {
+                msg(sender, "servers_offline", "name", info.name(), "id", info.id(), "seconds", info.silentMillis() / 1000);
+            }
+        }
     }
 
     private UUID owner(String name) {
         Player player = Bukkit.getPlayerExact(name);
         if (player != null && !fake(player)) return player.getUniqueId();
         var offline = Bukkit.getOfflinePlayerIfCached(name);
+        // 只有指令才会走到这里；遍历离线玩家较慢，不要用于 Tab 补全
         if (offline == null) offline = Arrays.stream(Bukkit.getOfflinePlayers())
             .filter(known -> name.equalsIgnoreCase(known.getName())).findFirst().orElse(null);
         var id = offline == null ? null : offline.getUniqueId();
-        return offline != null && (offline.hasPlayedBefore() || roster.allowances.containsKey(offline.getUniqueId()))
-            && roster.entries.values().stream().noneMatch(entry -> entry.id.equals(id)) ? id : null;
-    }
-
-    private void delete(Roster.Entry entry) {
-        synchronized (admissions) {
-            pending.remove(entry.id);
-            roster.remove(entry);
-        }
-        menus.close(entry);
-        Live active = live.get(entry.id);
-        if (active != null) active.dummy.getBukkitEntity().getScheduler().execute(this,
-            () -> { if (live.get(entry.id) == active) unlink(active, false); }, null, 1);
+        return offline != null && (offline.hasPlayedBefore() || roster.allowances.containsKey(id))
+            && !roster.byId.containsKey(id) ? id : null;
     }
 
     private static int integer(String value) {
@@ -947,75 +1432,82 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
         if (fake(sender) || args.length == 0) return List.of();
         List<String> options = new ArrayList<>();
         boolean admin = sender.hasPermission(ADMIN);
-        if (args.length == 1) {
-            if (sender instanceof Player player && player.hasPermission(USE)) {
-                options.addAll(List.of("menu", "spawn", "spawnnormal", "spawnpro", "spawnpromax", "normal", "pro", "promax",
-                    "b", "rename", "list", "direction", "dir", "despawn", "delete", "kill", "help"));
-                if (player.hasPermission(TELEPORT)) options.addAll(TELEPORT_ACTIONS);
-                roster.entries.values().stream().filter(entry -> allowed(player, entry)).forEach(entry -> options.add(String.valueOf(entry.key.slot())));
-            }
-            if (admin) options.addAll(List.of("grant", "setslots", "givecard", "delete", "kill", "deleteall", "purchaseitems", "benchmark", "help"));
-        } else if (args.length == 2 && admin && args[0].equalsIgnoreCase("deleteall")) options.add("confirm");
-        else if (args.length == 2 && admin && args[0].equalsIgnoreCase("benchmark")) options.addAll(List.of("spawn", "stop"));
-        else if (args.length == 3 && admin && args[0].equalsIgnoreCase("benchmark") && args[1].equalsIgnoreCase("spawn")) {
-            options.addAll(List.of("10", "25", "50", String.valueOf(TabBenchmark.MAX_ENTRIES)));
-        }
-        else if (args.length == 2 && admin && args[0].equalsIgnoreCase("givecard")) {
-            for (Player target : Bukkit.getOnlinePlayers()) if (!fake(target)) options.add(target.getName());
-        }
-        else if (args.length == 2 && admin && Set.of("grant", "setslots").contains(args[0].toLowerCase(Locale.ROOT))) {
-            Set<UUID> dummyIds = new HashSet<>(live.keySet());
-            roster.entries.values().forEach(entry -> dummyIds.add(entry.id));
-            for (OfflinePlayer target : Bukkit.getOfflinePlayers()) {
-                String name = target.getName();
-                if (name != null && !dummyIds.contains(target.getUniqueId())) options.add(name);
-            }
-            for (Player target : Bukkit.getOnlinePlayers()) if (!fake(target)) options.add(target.getName());
-        }
-        else if (args.length == 2 && sender instanceof Player player && player.hasPermission(USE)
-            && player.hasPermission(TELEPORT) && TELEPORT_ACTIONS.contains(args[0].toLowerCase(Locale.ROOT))) {
-            for (int slot = 1; slot <= slots(player.getUniqueId()); slot++) {
-                Roster.Entry entry = roster.entries.get(new Roster.Key(player.getUniqueId(), slot));
-                Live active = entry == null ? null : live.get(entry.id);
-                if (isSummoned(active)) { options.add(String.valueOf(slot)); options.add(entry.name()); }
-            }
-        }
-        else if (args.length == 2 && sender instanceof Player player && player.hasPermission(USE) && args[0].equalsIgnoreCase("rename")) {
-            for (int slot = 1; slot <= slots(player.getUniqueId()); slot++) {
-                if (roster.entries.containsKey(new Roster.Key(player.getUniqueId(), slot))) options.add(String.valueOf(slot));
-            }
-        }
-        else if (args.length == 2 && sender instanceof Player player && player.hasPermission(USE)
-            && Set.of("spawn", "b", "open", "direction", "dir", "despawn").contains(args[0].toLowerCase(Locale.ROOT))) {
-            if (args[0].equalsIgnoreCase("spawn")) options.addAll(List.of("normal", "pro", "promax"));
-            roster.entries.values().stream().filter(entry -> allowed(player, entry)).forEach(entry -> options.add(String.valueOf(entry.key.slot())));
-        }
-        else if (args.length == 2 && sender instanceof Player player && player.hasPermission(USE)
-            && Set.of("spawnpro", "spawnpromax", "spawnnormal", "normal", "pro", "promax")
-                .contains(args[0].toLowerCase(Locale.ROOT))) {
-            roster.entries.values().stream().filter(entry -> allowed(player, entry)).forEach(entry -> options.add(String.valueOf(entry.key.slot())));
-        }
-        else if (args.length == 3 && sender instanceof Player player && player.hasPermission(USE)
-            && args[0].equalsIgnoreCase("spawn")) {
-            options.addAll(List.of("normal", "pro", "promax"));
-        }
-        else if (args.length == 2 && (args[0].equalsIgnoreCase("delete") || args[0].equalsIgnoreCase("kill"))) {
-            for (Roster.Entry entry : roster.entries.values()) {
-                if (args[0].equalsIgnoreCase("kill") && !summoned(entry)) continue;
-                boolean own = sender instanceof Player player && entry.key.owner().equals(player.getUniqueId()) && player.hasPermission(USE);
-                if (admin || own) options.add(entry.name());
-                if (own) options.add(String.valueOf(entry.key.slot()));
-            }
-        }
         String prefix = args[args.length - 1].toLowerCase(Locale.ROOT);
-        return options.stream().distinct().filter(value -> value.toLowerCase(Locale.ROOT).startsWith(prefix)).sorted().toList();
+        String first = args[0].toLowerCase(Locale.ROOT);
+        Player self = sender instanceof Player player && player.hasPermission(USE) ? player : null;
+        boolean teleport = self != null && self.hasPermission(TELEPORT);
+        List<Roster.Entry> own = self == null ? List.of()
+            : roster.owned(self.getUniqueId()).stream().filter(entry -> allowed(self, entry)).toList();
+        if (args.length == 1) {
+            options.add("help");
+            if (self != null) options.addAll(List.of("spawn", "despawn", "list", "b", "dir", "rename", "delete"));
+            if (teleport) options.addAll(List.of("tp", "tph"));
+            if (admin) {
+                options.addAll(List.of("admin", "grant", "set", "card", "despawn", "delete", "clear", "servers", "test"));
+                if (sender instanceof Player) options.add("items");
+            }
+        } else if (args.length == 2) {
+            switch (first) {
+                case "admin" -> { if (admin) options.add("help"); }
+                case "spawn" -> {
+                    if (self != null) options.addAll(TIER_NAMES);
+                    own.forEach(entry -> options.add(String.valueOf(entry.key.slot())));
+                }
+                case "b", "dir", "rename" -> own.forEach(entry -> options.add(String.valueOf(entry.key.slot())));
+                case "tp", "tph" -> {
+                    if (teleport) for (Roster.Entry entry : own) {
+                        if (!running(entry)) continue;
+                        options.add(String.valueOf(entry.key.slot()));
+                        options.add(entry.name());
+                    }
+                }
+                case "despawn", "delete" -> {
+                    boolean despawn = first.equals("despawn");
+                    for (Roster.Entry entry : own) {
+                        if (despawn && !running(entry)) continue;
+                        options.add(String.valueOf(entry.key.slot()));
+                        options.add(entry.name());
+                    }
+                    if (admin) for (Roster.Entry entry : roster.entries.values()) {
+                        if (options.size() >= MAX_COMPLETIONS) break;
+                        if (despawn && !running(entry)) continue;
+                        if (entry.name().toLowerCase(Locale.ROOT).startsWith(prefix)) options.add(entry.name());
+                    }
+                }
+                // 只补全在线玩家：遍历全部离线玩家会在玩家多的服务器上卡顿；离线玩家仍可手动输入名字
+                case "grant", "set", "card" -> {
+                    if (admin) for (Player target : Bukkit.getOnlinePlayers()) if (!fake(target)) options.add(target.getName());
+                }
+                case "clear" -> {
+                    if (admin) {
+                        options.add(serverId);
+                        if (network.enabled()) {
+                            options.add("all");
+                            roster.servers().forEach(info -> options.add(info.id()));
+                        }
+                    }
+                }
+                case "test" -> {
+                    if (admin) options.addAll(List.of("stop", "10", "25", "50", String.valueOf(TabBenchmark.MAX_ENTRIES)));
+                }
+                default -> { }
+            }
+        } else if (args.length == 3 && self != null && first.equals("spawn")) options.addAll(TIER_NAMES);
+        return options.stream().distinct().filter(value -> value.toLowerCase(Locale.ROOT).startsWith(prefix))
+            .sorted().limit(MAX_COMPLETIONS).toList();
     }
 
+    /** 在本服或其他子服运行中。 */
+    private boolean running(Roster.Entry entry) { return summoned(entry) || roster.remoteHolder(entry) != null; }
+
+    // ══ 关闭 ══════════════════════════════════════════════
+
     @Override public void onDisable() {
+        shuttingDown = true;
         synchronized (admissions) { pending.clear(); }
         boolean stopping = Bukkit.isStopping();
         int removed = 0;
-        for (Live active : List.copyOf(live.values())) {
+        if (folia != null) for (Live active : List.copyOf(live.values())) {
             try {
                 if (stopping) snapshot(active);
                 if (stopping && folia.regionThreaded()) {
@@ -1023,7 +1515,7 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
                         active.inWorld = false;
                         active.hiddenTag.clear();
                         active.dummy.link.dispose();
-                        live.remove(active.entry.id, active);
+                        if (live.remove(active.entry.id, active)) releaseLease(active.entry);
                         if (!active.dummy.isRemoved()) {
                             getLogger().warning("Fake player was not attached to a shutdown region: " + active.entry.profile());
                         }
@@ -1041,7 +1533,13 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
         try { benchmark.close(); }
         finally {
             try { CraftEngineCompat.restore(); }
-            finally { if (roster != null) roster.close(); }
+            finally {
+                try { if (roster != null) roster.close(); }
+                finally {
+                    try { if (network != null) network.close(); }
+                    finally { if (database != null) database.close(); }
+                }
+            }
         }
     }
 }

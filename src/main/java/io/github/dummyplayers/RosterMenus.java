@@ -23,7 +23,7 @@ import org.bukkit.persistence.PersistentDataType;
 import java.util.*;
 
 final class RosterMenus implements Listener {
-    private record Icon(Material type, String name, List<String> lore, String action) { }
+    private record Icon(MenuItem item, String name, List<String> lore, String action) { }
     private record Layout(String title, int size, Map<Integer, Icon> icons, int[] dummySlots, Icon dummyIcon) { }
 
     private enum Kind { MAIN, TIER, SPAWN_CONFIRM, BRING_CONFIRM, PURCHASE, PURCHASE_ITEMS }
@@ -37,8 +37,10 @@ final class RosterMenus implements Listener {
         final Layout layout;
         final Inventory inventory;
         final PurchasePrice price;
+        /** 正在处理购买，忽略后续点击。只在玩家线程读写。 */
+        boolean busy;
 
-        Panel(DummyPlayers plugin, UUID player, Kind kind, int page, Roster.Entry entry, int slot, DummyTier tier, Layout layout) {
+        Panel(DummyPlayers plugin, UUID player, Kind kind, int page, int pages, Roster.Entry entry, int slot, DummyTier tier, Layout layout) {
             this.player = player;
             this.kind = kind;
             this.page = page;
@@ -47,7 +49,7 @@ final class RosterMenus implements Listener {
             this.tier = tier;
             this.layout = layout;
             this.price = kind == Kind.PURCHASE || kind == Kind.PURCHASE_ITEMS ? plugin.purchasePrice() : null;
-            inventory = Bukkit.createInventory(this, layout.size, text(layout.title, plugin, entry, placeholders(plugin, page, slot, tier)));
+            inventory = Bukkit.createInventory(this, layout.size, text(layout.title, plugin, entry, placeholders(plugin, page, pages, slot, tier)));
         }
 
         @Override public Inventory getInventory() { return inventory; }
@@ -56,7 +58,7 @@ final class RosterMenus implements Listener {
     private final DummyPlayers plugin;
     private final Map<String, Layout> layouts;
     private final NamespacedKey actionKey, objectKey;
-    private final String summoned, notSummoned;
+    private final String summoned, summonedRemote, notSummoned;
 
     RosterMenus(DummyPlayers plugin, YamlConfiguration yaml) {
         this.plugin = plugin;
@@ -64,14 +66,15 @@ final class RosterMenus implements Listener {
         actionKey = new NamespacedKey(plugin, "gui_action");
         objectKey = new NamespacedKey(plugin, "object_id");
         summoned = yaml.getString("states.summoned", "&a已召唤");
-        notSummoned = yaml.getString("states.not-summoned", "&7未召唤");
+        summonedRemote = yaml.getString("states.summoned_remote", "&b在 %server% 运行");
+        notSummoned = yaml.getString("states.not_summoned", "&7未召唤");
     }
 
     static void validate(YamlConfiguration yaml) { readLayouts(yaml); }
 
     private static Map<String, Layout> readLayouts(YamlConfiguration yaml) {
         Map<String, Layout> layouts = new HashMap<>();
-        for (String name : List.of("main", "tier-select", "spawn-confirm", "teleport-confirm", "purchase-confirm", "purchase-items")) {
+        for (String name : List.of("main", "tier_select", "spawn_confirm", "teleport_confirm", "purchase_confirm", "purchase_items")) {
             ConfigurationSection section = yaml.getConfigurationSection(name);
             if (section == null) throw bad(name, "missing section");
             List<String> rows = section.getStringList("shape");
@@ -88,11 +91,12 @@ final class RosterMenus implements Listener {
                 if (token == '.') continue;
                 ConfigurationSection item = section.getConfigurationSection("items." + token);
                 if (item == null) throw bad(name, "undefined symbol '" + token + "'");
-                Material type = Material.matchMaterial(item.getString("type", "PAPER"));
-                if (type == null || !type.isItem() || type.isAir()) throw bad(name, "invalid material for '" + token + "'");
+                MenuItem look;
+                try { look = MenuItem.read(item); }
+                catch (IllegalArgumentException invalid) { throw bad(name, "'" + token + "': " + invalid.getMessage()); }
                 String action = item.getString("action", "");
                 if (!validAction(name, action)) throw bad(name, "unknown action for '" + token + "': " + action);
-                Icon icon = new Icon(type, item.getString("name", " "), item.getStringList("lore"), action);
+                Icon icon = new Icon(look, item.getString("name", " "), item.getStringList("lore"), action);
                 if (name.equals("main") && token == 'A') {
                     if (dummyIcon == null) dummyIcon = icon;
                     else if (!dummyIcon.equals(icon)) throw bad(name, "all A slots must use the same item");
@@ -100,7 +104,7 @@ final class RosterMenus implements Listener {
                 } else icons.put(slot, icon);
             }
             if (name.equals("main") && (dummySlots.isEmpty() || dummyIcon == null)) throw bad(name, "requires at least one A slot");
-            if (name.equals("purchase-items") && icons.values().stream().filter(icon -> icon.action.equals("purchase_sample")).count() != 3) {
+            if (name.equals("purchase_items") && icons.values().stream().filter(icon -> icon.action.equals("purchase_sample")).count() != 3) {
                 throw bad(name, "requires exactly three purchase_sample slots");
             }
             layouts.put(name, new Layout(section.getString("title", " "), size, Map.copyOf(icons),
@@ -112,8 +116,8 @@ final class RosterMenus implements Listener {
     private static boolean validAction(String menu, String action) {
         if (action.isEmpty() || action.equals("close") || action.equals("none")) return true;
         if (menu.equals("main")) return Set.of("none", "dummy", "page:previous", "page:next", "refresh", "new_dummy").contains(action);
-        if (menu.equals("tier-select")) return action.equals("cancel") || Set.of("tier:normal", "tier:pro", "tier:promax").contains(action);
-        if (menu.equals("purchase-items")) return Set.of("purchase_sample", "save_purchase_items").contains(action);
+        if (menu.equals("tier_select")) return action.equals("cancel") || Set.of("tier:normal", "tier:pro", "tier:promax").contains(action);
+        if (menu.equals("purchase_items")) return Set.of("purchase_sample", "save_purchase_items").contains(action);
         return Set.of("confirm", "cancel").contains(action);
     }
 
@@ -122,22 +126,22 @@ final class RosterMenus implements Listener {
     }
 
     void openMain(Player player, int requestedPage) {
-        if (!player.hasPermission(DummyPlayers.USE)) { plugin.msg(player, "no-permission"); return; }
+        if (!player.hasPermission(DummyPlayers.USE)) { plugin.msg(player, "no_permission"); return; }
         Layout layout = layouts.get("main");
         List<Roster.Entry> owned = owned(player);
         int pages = Math.max(1, Math.ceilDiv(owned.size(), layout.dummySlots.length));
         int page = Math.clamp(requestedPage, 0, pages - 1);
-        Panel panel = new Panel(plugin, player.getUniqueId(), Kind.MAIN, page, null, 0, null, layout);
+        Panel panel = new Panel(plugin, player.getUniqueId(), Kind.MAIN, page, pages, null, 0, null, layout);
         PurchasePrice price = plugin.purchasePrice();
         for (var item : layout.icons.entrySet()) {
             Icon icon = item.getValue();
-            ItemStack stack = render(icon, null, page, 0, null, icon.action.equals("new_dummy") ? price : null);
+            ItemStack stack = render(icon, null, page, pages, 0, null, icon.action.equals("new_dummy") ? price : null);
             panel.inventory.setItem(item.getKey(), stack);
         }
         int start = page * layout.dummySlots.length;
         for (int index = 0; index < layout.dummySlots.length && start + index < owned.size(); index++) {
             Roster.Entry entry = owned.get(start + index);
-            ItemStack stack = render(layout.dummyIcon, entry, page, 0, null, null);
+            ItemStack stack = render(layout.dummyIcon, entry, page, pages, 0, null, null);
             stack.editMeta(meta -> meta.getPersistentDataContainer().set(objectKey, PersistentDataType.STRING, entry.id.toString()));
             panel.inventory.setItem(layout.dummySlots[index], stack);
         }
@@ -145,9 +149,8 @@ final class RosterMenus implements Listener {
     }
 
     private List<Roster.Entry> owned(Player player) {
-        return plugin.roster.entries.values().stream()
-            .filter(entry -> entry.key.owner().equals(player.getUniqueId()) && entry.key.slot() <= plugin.slots(player.getUniqueId()))
-            .sorted(Comparator.comparingInt(entry -> entry.key.slot())).toList();
+        int slots = plugin.slots(player.getUniqueId());
+        return plugin.roster.owned(player.getUniqueId()).stream().filter(entry -> entry.key.slot() <= slots).toList();
     }
 
     private void open(Player player, Panel panel) {
@@ -160,24 +163,24 @@ final class RosterMenus implements Listener {
     }
 
     private void openTier(Player player, Roster.Entry entry, int slot, int page) {
-        openPanel(player, Kind.TIER, page, entry, slot, null, "tier-select");
+        openPanel(player, Kind.TIER, page, entry, slot, null, "tier_select");
     }
 
     private void openSpawnConfirm(Player player, Roster.Entry entry, int slot, int page, DummyTier tier) {
-        openPanel(player, Kind.SPAWN_CONFIRM, page, entry, slot, tier, "spawn-confirm");
+        openPanel(player, Kind.SPAWN_CONFIRM, page, entry, slot, tier, "spawn_confirm");
     }
 
     private void openBringConfirm(Player player, Roster.Entry entry, int page) {
-        openPanel(player, Kind.BRING_CONFIRM, page, entry, entry.key.slot(), null, "teleport-confirm");
+        openPanel(player, Kind.BRING_CONFIRM, page, entry, entry.key.slot(), null, "teleport_confirm");
     }
 
     void openPurchaseItems(Player player) {
-        openPanel(player, Kind.PURCHASE_ITEMS, 0, null, 0, null, "purchase-items");
+        openPanel(player, Kind.PURCHASE_ITEMS, 0, null, 0, null, "purchase_items");
     }
 
     private void openPanel(Player player, Kind kind, int page, Roster.Entry entry, int slot, DummyTier tier, String layoutName) {
         Layout layout = layouts.get(layoutName);
-        Panel panel = new Panel(plugin, player.getUniqueId(), kind, page, entry, slot, tier, layout);
+        Panel panel = new Panel(plugin, player.getUniqueId(), kind, page, 1, entry, slot, tier, layout);
         var samples = panel.price == null ? Collections.<ItemStack>emptyIterator() : panel.price.items().iterator();
         for (int index = 0; index < layout.size; index++) {
             Icon icon = layout.icons.get(index);
@@ -186,36 +189,41 @@ final class RosterMenus implements Listener {
                 if (samples.hasNext()) panel.inventory.setItem(index, samples.next().clone());
                 continue;
             }
-            DummyTier iconTier = kind == Kind.TIER && icon.action.startsWith("tier:") ? DummyTier.fromCommand(icon.action.substring(5)) : tier;
-            ItemStack stack = render(icon, entry, page, slot, iconTier,
+            DummyTier iconTier = kind == Kind.TIER && icon.action.startsWith("tier:") ? DummyTier.fromName(icon.action.substring(5)) : tier;
+            ItemStack stack = render(icon, entry, page, 1, slot, iconTier,
                 kind == Kind.PURCHASE && icon.action.equals("confirm") ? panel.price : null);
             panel.inventory.setItem(index, stack);
         }
         open(player, panel);
     }
 
+    /** 购买价格：金币、点券、物品各占一行，全部为空时显示免费。 */
     private List<Component> purchaseLore(PurchasePrice price) {
         var cost = new ArrayList<Component>();
-        cost.add(switch (price.mode()) {
-            case "coins" -> plugin.menuMessage("purchase-cost-coins", java.math.BigDecimal.valueOf(price.coins()).stripTrailingZeros().toPlainString());
-            case "points" -> plugin.menuMessage("purchase-cost-points", String.valueOf(price.points()));
-            case "items" -> plugin.menuMessage(price.items().isEmpty() ? "purchase-unavailable" : "purchase-cost-items", "");
-            default -> plugin.menuMessage("purchase-cost-free", "");
-        });
-        if (price.mode().equals("items")) for (ItemStack needed : price.items()) {
+        if (price.free()) {
+            cost.add(plugin.menuMessage("purchase_cost_free", ""));
+            return cost;
+        }
+        if (price.coins() > 0) {
+            cost.add(plugin.menuMessage("purchase_cost_coins", java.math.BigDecimal.valueOf(price.coins()).stripTrailingZeros().toPlainString()));
+        }
+        if (price.points() > 0) cost.add(plugin.menuMessage("purchase_cost_points", String.valueOf(price.points())));
+        if (!price.items().isEmpty()) cost.add(plugin.menuMessage("purchase_cost_items", ""));
+        for (ItemStack needed : price.items()) {
             var itemMeta = needed.getItemMeta();
             Component name = itemMeta.customName();
             if (name == null) name = itemMeta.itemName();
             if (name == null) name = Component.translatable(needed.translationKey());
-            cost.add(name.decorationIfAbsent(TextDecoration.ITALIC, TextDecoration.State.FALSE));
+            cost.add(Component.text("  ").append(name).append(Component.text(" ×" + needed.getAmount()))
+                .decorationIfAbsent(TextDecoration.ITALIC, TextDecoration.State.FALSE));
         }
         return cost;
     }
 
-    private ItemStack render(Icon icon, Roster.Entry entry, int page, int slot, DummyTier tier, PurchasePrice price) {
-        ItemStack stack = new ItemStack(icon.type);
-        var values = placeholders(plugin, page, entry != null ? entry.key.slot() : slot, tier != null ? tier : entry == null ? null : entry.tier);
-        values.put("status", entry != null && plugin.summoned(entry) ? summoned : notSummoned);
+    private ItemStack render(Icon icon, Roster.Entry entry, int page, int pages, int slot, DummyTier tier, PurchasePrice price) {
+        ItemStack stack = icon.item.create();
+        var values = placeholders(plugin, page, pages, entry != null ? entry.key.slot() : slot, tier != null ? tier : entry == null ? null : entry.tier);
+        values.put("status", status(entry));
         stack.editMeta(meta -> {
             meta.customName(text(icon.name, plugin, entry, values));
             var lore = new ArrayList<Component>();
@@ -235,9 +243,18 @@ final class RosterMenus implements Listener {
         return stack;
     }
 
-    private static Map<String, String> placeholders(DummyPlayers plugin, int page, int slot, DummyTier tier) {
+    private String status(Roster.Entry entry) {
+        if (entry == null) return notSummoned;
+        if (plugin.summoned(entry)) return summoned;
+        String remote = plugin.roster.remoteHolder(entry);
+        return remote == null ? notSummoned : summonedRemote.replace("%server%", plugin.serverLabel(remote));
+    }
+
+    private static Map<String, String> placeholders(DummyPlayers plugin, int page, int pages, int slot, DummyTier tier) {
         Map<String, String> values = new HashMap<>();
-        values.put("page", String.valueOf(page + 1));
+        values.put("current_page", String.valueOf(page + 1));
+        values.put("total_pages", String.valueOf(pages));
+        values.put("page", String.valueOf(page + 1)); // 旧写法，兼容已有的自定义菜单
         values.put("slot", String.valueOf(slot));
         values.put("tier", tier == null ? "" : plugin.menuTierName(tier));
         values.put("price", tier == null ? "" : plugin.menuPrice(tier));
@@ -265,7 +282,7 @@ final class RosterMenus implements Listener {
         if (!(event.getView().getTopInventory().getHolder() instanceof Panel panel)) return;
         event.setCancelled(true);
         if (!(event.getWhoClicked() instanceof Player player) || !panel.player.equals(player.getUniqueId())
-            || event instanceof InventoryCreativeEvent) return;
+            || event instanceof InventoryCreativeEvent || panel.busy) return;
         int raw = event.getRawSlot();
         if (panel.kind == Kind.PURCHASE_ITEMS) {
             if (!player.hasPermission(DummyPlayers.ADMIN)) return;
@@ -284,9 +301,10 @@ final class RosterMenus implements Listener {
                 var items = panel.layout.icons.entrySet().stream().filter(item -> item.getValue().action.equals("purchase_sample"))
                     .sorted(Map.Entry.comparingByKey()).map(item -> panel.inventory.getItem(item.getKey()))
                     .filter(Objects::nonNull).filter(item -> !item.getType().isAir()).map(ItemStack::clone).toList();
-                if (panel.price != plugin.purchasePrice()) { plugin.msg(player, "purchase-changed"); player.closeInventory(); }
-                else if (plugin.savePurchaseItems(items)) { plugin.msg(player, "purchase-items-saved"); player.closeInventory(); }
-                else plugin.msg(player, "purchase-unavailable");
+                if (panel.price != plugin.purchasePrice()) { plugin.msg(player, "purchase_changed"); player.closeInventory(); return; }
+                player.closeInventory();
+                plugin.savePurchaseItems(items).thenAccept(saved -> openLater(player,
+                    () -> plugin.msg(player, saved ? "purchase_items_saved" : "storage_error")));
             });
             return;
         }
@@ -297,7 +315,9 @@ final class RosterMenus implements Listener {
             if (clicked == null) return;
             String id = clicked.getItemMeta().getPersistentDataContainer().get(objectKey, PersistentDataType.STRING);
             if (id == null) return;
-            Roster.Entry entry = plugin.roster.entries.values().stream().filter(value -> value.id.toString().equals(id)).findFirst().orElse(null);
+            Roster.Entry entry;
+            try { entry = plugin.roster.byId.get(UUID.fromString(id)); }
+            catch (IllegalArgumentException invalid) { return; }
             if (entry == null || !plugin.allowed(player, entry)) { openLater(player, () -> openMain(player, panel.page)); return; }
             if (event.getClick() == ClickType.SHIFT_RIGHT) {
                 openLater(player, () -> plugin.menus.open(player, entry, "inventory"));
@@ -305,7 +325,7 @@ final class RosterMenus implements Listener {
                 plugin.requestTeleportFromMenu(player, entry.key.slot(), false);
             } else if (event.getClick() == ClickType.LEFT) {
                 openLater(player, () -> {
-                    if (plugin.summoned(entry)) openBringConfirm(player, entry, panel.page);
+                    if (plugin.summoned(entry) || plugin.roster.remoteHolder(entry) != null) openBringConfirm(player, entry, panel.page);
                     else openTier(player, entry, entry.key.slot(), panel.page);
                 });
             }
@@ -334,26 +354,39 @@ final class RosterMenus implements Listener {
             case "page:previous" -> openLater(player, () -> openMain(player, panel.page - 1));
             case "page:next" -> openLater(player, () -> openMain(player, panel.page + 1));
             case "refresh" -> openLater(player, () -> openMain(player, panel.page));
-            case "new_dummy" -> openPanel(player, Kind.PURCHASE, panel.page, null, 0, null, "purchase-confirm");
+            case "new_dummy" -> openPanel(player, Kind.PURCHASE, panel.page, null, 0, null, "purchase_confirm");
             case "cancel" -> openLater(player, () -> {
                 if (panel.kind == Kind.SPAWN_CONFIRM) openTier(player, panel.entry, panel.slot, panel.page);
                 else openMain(player, panel.page);
             });
             case "tier:normal", "tier:pro", "tier:promax" -> {
+                DummyTier tier = DummyTier.fromName(action.substring(5));
+                if (plugin.summonNeedsConfirm(tier)) {
+                    openLater(player, () -> openSpawnConfirm(player, panel.entry, panel.slot, panel.page, tier));
+                    return;
+                }
                 player.closeInventory();
-                plugin.summonFromMenu(player, panel.entry, panel.slot, DummyTier.fromCommand(action.substring(5)));
+                plugin.summonFromMenu(player, panel.entry, panel.slot, tier);
             }
             case "confirm" -> {
-                player.closeInventory();
                 if (panel.kind == Kind.PURCHASE) {
-                    int number = plugin.buyDummy(player, panel.price);
-                    int page = panel.page;
-                    if (number > 0) {
-                        long preceding = owned(player).stream().filter(entry -> entry.key.slot() < number).count();
-                        page = (int) preceding / layouts.get("main").dummySlots.length;
-                    }
-                    openMain(player, page);
-                } else if (panel.kind == Kind.SPAWN_CONFIRM) plugin.summonFromMenu(player, panel.entry, panel.slot, panel.tier);
+                    // 不先关闭界面：先关再开会让客户端把鼠标重置到屏幕中间。
+                    // 处理期间忽略点击（防止重复购买），完成后直接切换到主菜单，鼠标保持原位
+                    if (panel.busy) return;
+                    panel.busy = true;
+                    plugin.buyDummy(player, panel.price).thenAccept(number -> openLater(player, () -> {
+                        if (player.getOpenInventory().getTopInventory() != panel.inventory) return;
+                        int page = panel.page;
+                        if (number > 0) {
+                            long preceding = owned(player).stream().filter(entry -> entry.key.slot() < number).count();
+                            page = (int) preceding / layouts.get("main").dummySlots.length;
+                        }
+                        openMain(player, page);
+                    }));
+                    return;
+                }
+                player.closeInventory();
+                if (panel.kind == Kind.SPAWN_CONFIRM) plugin.summonFromMenu(player, panel.entry, panel.slot, panel.tier);
                 else if (panel.kind == Kind.BRING_CONFIRM) plugin.requestTeleportFromMenu(player, panel.slot, true);
             }
             default -> { }

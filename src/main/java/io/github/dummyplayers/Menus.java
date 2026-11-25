@@ -21,15 +21,18 @@ import org.bukkit.persistence.PersistentDataType;
 import java.util.*;
 
 final class Menus implements Listener {
-    private record Button(Material type, String name, List<String> lore, String action) { }
-    private record Layout(String title, int[] slots, Map<Integer, Button> buttons) { }
+    private record Button(MenuItem item, String name, List<String> lore, String action) { }
+    /** empty：装备栏和副手为空时显示的占位图标，键为物品栏编号（36 靴子 … 39 头盔，40 副手）。 */
+    private record Layout(String title, int[] slots, Map<Integer, Button> buttons, Map<Integer, Button> empty) { }
+    private static final String EMPTY_SLOT = "empty_slot";
+    private static final Map<String, Integer> EMPTY_SLOTS = Map.of("helmet", 39, "chestplate", 38, "leggings", 37, "boots", 36, "offhand", 40);
     private final DummyPlayers plugin;
     private final Map<String, Layout> layouts = new HashMap<>();
     private final Map<UUID, View> viewers = new java.util.concurrent.ConcurrentHashMap<>();
     private final Map<UUID, Roster.Entry> directionInputs = new java.util.concurrent.ConcurrentHashMap<>();
     private final Map<UUID, Roster.Entry> attackInputs = new java.util.concurrent.ConcurrentHashMap<>();
     private final NamespacedKey actionKey, objectKey;
-    private final String enabled, disabled;
+    private final String enabled, disabled, notSet, autoTool;
 
     private static final class View implements InventoryHolder {
         final Roster.Entry entry;
@@ -37,7 +40,8 @@ final class Menus implements Listener {
         final Layout layout;
         final Inventory inventory;
         long displayedRevision = -1;
-        boolean local;
+        boolean local, acquiring;
+        int age;
 
         View(Roster.Entry entry, UUID viewer, Layout layout) {
             this.entry = entry;
@@ -57,6 +61,8 @@ final class Menus implements Listener {
         objectKey = new NamespacedKey(plugin, "object_id");
         enabled = yaml.getString("states.enabled", "&a开启");
         disabled = yaml.getString("states.disabled", "&c关闭");
+        notSet = yaml.getString("states.not_set", "&7未设置");
+        autoTool = yaml.getString("states.auto_tool", "&f自动匹配");
         layouts.putAll(readLayouts(yaml));
     }
 
@@ -85,16 +91,26 @@ final class Menus implements Listener {
                 }
                 ConfigurationSection item = section.getConfigurationSection("items." + token);
                 if (item == null) throw bad(name, "undefined symbol '" + token + "'");
-                Material type = Material.matchMaterial(item.getString("type", "PAPER"));
-                if (type == null || !type.isItem() || type.isAir()) throw bad(name, "invalid material for '" + token + "'");
+                MenuItem look;
+                try { look = MenuItem.read(item); }
+                catch (IllegalArgumentException invalid) { throw bad(name, "'" + token + "': " + invalid.getMessage()); }
                 String action = item.getString("action", "");
                 if (!Set.of("", "open_gui:inventory", "open_gui:settings", "toggle:mine", "toggle:attack", "toggle:use", "toggle:unload", "toggle:pushable", "toggle:sneak", "select:placement", "direction", "close").contains(action)) {
                     throw bad(name, "unknown action for '" + token + "': " + action);
                 }
-                buttons.put(slot, new Button(type, item.getString("name", " "), item.getStringList("lore"), action));
+                buttons.put(slot, new Button(look, item.getString("name", " "), item.getStringList("lore"), action));
             }
             if (name.equals("inventory") && (bag != 36 || hotbar != 9 || armor != 35 || offhand != 1)) throw bad(name, "requires exactly 27 B, 9 H, 4 E and one F");
-            layouts.put(name, new Layout(section.getString("title", "%name%"), slots, Map.copyOf(buttons)));
+            Map<Integer, Button> empty = new HashMap<>();
+            ConfigurationSection emptySection = name.equals("inventory") ? section.getConfigurationSection("empty_slots") : null;
+            if (emptySection != null) for (String key : emptySection.getKeys(false)) {
+                Integer slot = EMPTY_SLOTS.get(key);
+                ConfigurationSection item = emptySection.getConfigurationSection(key);
+                if (slot == null || item == null) throw bad(name, "empty_slots supports helmet, chestplate, leggings, boots and offhand: " + key);
+                try { empty.put(slot, new Button(MenuItem.read(item), item.getString("name", " "), item.getStringList("lore"), EMPTY_SLOT)); }
+                catch (IllegalArgumentException invalid) { throw bad(name, "empty_slots." + key + ": " + invalid.getMessage()); }
+            }
+            layouts.put(name, new Layout(section.getString("title", "%name%"), slots, Map.copyOf(buttons), Map.copyOf(empty)));
         }
         return layouts;
     }
@@ -103,31 +119,91 @@ final class Menus implements Listener {
         return new IllegalArgumentException(ConfigUpgrade.menuFile(section) + ": " + reason);
     }
 
+    /**
+     * 打开菜单。打开背包时先获取编辑租约（从数据库读取最新背包）；
+     * 假人在其他子服运行或被编辑时以只读方式打开，并定时刷新。
+     */
     void open(Player player, Roster.Entry entry, String menu) {
         if (!plugin.allowed(player, entry)) return;
+        if (!menu.equals("inventory") || plugin.roster.holds(entry)) { show(player, entry, menu); return; }
+        plugin.roster.acquire(entry, false).whenComplete((claim, error) -> {
+            boolean acquired = error == null && claim.status() == Roster.Claim.ACQUIRED;
+            if (!player.getScheduler().execute(plugin, () -> {
+                if (!plugin.allowed(player, entry)) { if (acquired) maybeRelease(entry); return; }
+                if (error != null) {
+                    plugin.getLogger().log(java.util.logging.Level.WARNING, "Could not open the inventory of " + entry.profile(), error);
+                    plugin.msg(player, "storage_error");
+                    return;
+                }
+                switch (claim.status()) {
+                    case MISSING -> plugin.msg(player, "not_found");
+                    case HELD -> {
+                        plugin.msg(player, "remote_inventory_server", "server", plugin.serverLabel(claim.holder()));
+                        show(player, entry, menu);
+                    }
+                    case ACQUIRED -> show(player, entry, menu);
+                }
+            }, () -> { if (acquired) plugin.roster.release(entry, true); }, 1) && acquired) plugin.roster.release(entry, true);
+        });
+    }
+
+    private void show(Player player, Roster.Entry entry, String menu) {
         var view = new View(entry, player.getUniqueId(), layouts.get(menu));
         refreshItems(view);
         refreshButtons(view);
-        if (player.openInventory(view.inventory) != null) {
-            viewers.put(view.viewer, view);
-            player.getScheduler().runAtFixedRate(plugin, task -> {
-                if (viewers.get(view.viewer) != view) { task.cancel(); return; }
-                if (!plugin.allowed(player, view.entry)) player.closeInventory();
-                else {
-                    boolean local = plugin.editable(view.entry);
-                    if (local || local != view.local || view.displayedRevision != view.entry.inventoryRevision) refreshItems(view);
-                }
-            }, () -> viewers.remove(view.viewer, view), 10, 10);
+        // 先登记新界面，再打开：旧界面关闭时据此判断是否还需要编辑租约
+        viewers.put(view.viewer, view);
+        if (player.openInventory(view.inventory) == null) {
+            viewers.remove(view.viewer, view);
+            maybeRelease(entry);
+            return;
         }
+        player.getScheduler().runAtFixedRate(plugin, task -> {
+            if (viewers.get(view.viewer) != view) { task.cancel(); return; }
+            if (!plugin.allowed(player, view.entry)) { player.closeInventory(); return; }
+            boolean local = plugin.editable(view.entry);
+            if (local || local != view.local || view.displayedRevision != view.entry.inventoryRevision) refreshItems(view);
+            if (view.layout == layouts.get("inventory") && !plugin.roster.holds(view.entry) && ++view.age % 4 == 0) {
+                remoteRefresh(player, view);
+            }
+        }, () -> { if (viewers.remove(view.viewer, view)) maybeRelease(view.entry); }, 10, 10);
+    }
+
+    /** 只读背包每 2 秒刷新一次；假人不再被其他子服占用时尝试转为可编辑。 */
+    private void remoteRefresh(Player player, View view) {
+        if (view.acquiring) return;
+        if (plugin.roster.remoteHolder(view.entry) != null) {
+            plugin.roster.refreshItems(view.entry);
+            return;
+        }
+        view.acquiring = true;
+        plugin.roster.acquire(view.entry, false).whenComplete((claim, error) -> {
+            boolean acquired = error == null && claim.status() == Roster.Claim.ACQUIRED;
+            if (!player.getScheduler().execute(plugin, () -> {
+                view.acquiring = false;
+                if (acquired && viewers.get(view.viewer) != view) maybeRelease(view.entry);
+                else if (!acquired) plugin.roster.refreshItems(view.entry);
+            }, () -> { if (acquired) maybeRelease(view.entry); }, 1) && acquired) maybeRelease(view.entry);
+        });
+    }
+
+    /** 本服是否有玩家正在背包界面中编辑该假人。 */
+    boolean editing(Roster.Entry entry) {
+        Layout inventory = layouts.get("inventory");
+        for (View view : viewers.values()) if (view.entry == entry && view.layout == inventory) return true;
+        return false;
+    }
+
+    private void maybeRelease(Roster.Entry entry) {
+        if (!editing(entry)) plugin.roster.release(entry, true);
     }
 
     private void refreshButtons(View view) {
         view.layout.buttons.forEach((slot, button) -> {
             Material placement = view.entry.placementBlock;
-            ItemStack icon = new ItemStack(switch (button.action) {
-                case "select:placement" -> placement == null ? button.type : placement;
-                default -> button.type;
-            });
+            // 「放置方块」按钮显示当前选择的方块；其他按钮使用配置的外观（支持自定义物品）
+            ItemStack icon = button.action.equals("select:placement") && placement != null
+                ? new ItemStack(placement) : button.item.create();
             icon.editMeta(meta -> {
                 meta.customName(text(button.name, button, view.entry));
                 meta.lore(button.lore.stream().map(line -> text(line, button, view.entry)).toList());
@@ -149,10 +225,10 @@ final class Menus implements Listener {
             default -> false;
         };
         return DummyPlayers.TEXT.deserialize(source.replace("%state%", on ? enabled : disabled)
-                .replace("%tool%", "自动匹配").replace("%attack_interval%", String.valueOf(entry.attackIntervalTicks)))
+                .replace("%tool%", autoTool).replace("%attack_interval%", String.valueOf(entry.attackIntervalTicks)))
             .replaceText(builder -> builder.matchLiteral("%name%").replacement(Component.text(entry.name())))
             .replaceText(builder -> builder.matchLiteral("%placement_block%").replacement(entry.placementBlock == null
-                ? Component.text("未设置") : Component.translatable(entry.placementBlock.translationKey())))
+                ? DummyPlayers.TEXT.deserialize(notSet) : Component.translatable(entry.placementBlock.translationKey())))
             .decoration(TextDecoration.ITALIC, false);
     }
 
@@ -164,8 +240,32 @@ final class Menus implements Listener {
             if (remote < 0) continue;
             ItemStack item = plugin.item(view.entry, remote);
             if (item != null && item.getType().isAir()) item = null;
-            if (!Objects.equals(view.inventory.getItem(index), item)) view.inventory.setItem(index, DummyPlayers.copy(item));
+            display(view, index, remote, item);
         }
+    }
+
+    /** 显示某个物品栏格子；装备栏和副手为空时显示占位图标（模拟原版背包里的盔甲、盾牌轮廓）。 */
+    private void display(View view, int index, int remote, ItemStack item) {
+        ItemStack shown = view.inventory.getItem(index);
+        Button empty = item == null ? view.layout.empty.get(remote) : null;
+        if (empty != null) {
+            if (!placeholder(shown)) {
+                ItemStack icon = empty.item.create();
+                icon.editMeta(meta -> {
+                    meta.customName(text(empty.name, empty, view.entry));
+                    meta.lore(empty.lore.stream().map(line -> text(line, empty, view.entry)).toList());
+                    meta.getPersistentDataContainer().set(actionKey, PersistentDataType.STRING, EMPTY_SLOT);
+                });
+                view.inventory.setItem(index, icon);
+            }
+            return;
+        }
+        if (!Objects.equals(shown, item)) view.inventory.setItem(index, DummyPlayers.copy(item));
+    }
+
+    private boolean placeholder(ItemStack stack) {
+        return stack != null && !stack.isEmpty() && stack.hasItemMeta()
+            && EMPTY_SLOT.equals(stack.getItemMeta().getPersistentDataContainer().get(actionKey, PersistentDataType.STRING));
     }
 
     boolean watching(Roster.Entry entry) {
@@ -187,9 +287,14 @@ final class Menus implements Listener {
         int remote = view.layout.slots[raw];
         if (remote >= 0) {
             if (!simple && !quick) return;
-            if (!plugin.editable(view.entry)) { plugin.msg(player, "remote-inventory"); return; }
+            if (!plugin.editable(view.entry)) {
+                if (plugin.roster.holds(view.entry)) plugin.msg(player, "remote_inventory");
+                else plugin.msg(player, "remote_inventory_server", "server", plugin.serverLabel(plugin.roster.remoteHolder(view.entry)));
+                return;
+            }
             ItemStack current = DummyPlayers.copy(plugin.item(view.entry, remote));
-            if (!Objects.equals(current, DummyPlayers.copy(event.getCurrentItem()))) { refreshItems(view); return; }
+            ItemStack shown = placeholder(event.getCurrentItem()) ? null : DummyPlayers.copy(event.getCurrentItem());
+            if (!Objects.equals(current, shown)) { refreshItems(view); return; }
             if (quick) quickWithdraw(player, view, raw, remote, current);
             else transfer(event, player, view, raw, remote, current);
             return;
@@ -233,7 +338,7 @@ final class Menus implements Listener {
                 if (event.getClick() == ClickType.LEFT) {
                     ItemStack sample = event.getCursor();
                     if (sample == null || !sample.getType().isBlock() || !(CraftMagicNumbers.getItem(sample.getType()) instanceof BlockItem)) {
-                        plugin.msg(player, "placement-sample");
+                        plugin.msg(player, "placement_sample");
                         return;
                     }
                     selected = sample.getType();
@@ -261,16 +366,14 @@ final class Menus implements Listener {
             }
             default -> { return; }
         }
-        plugin.roster.dirty(view.entry);
-        plugin.roster.save();
-        view.entry.wakeWork();
+        plugin.settingsChanged(view.entry);
         refreshButtons(view);
     }
 
     private void beginAttackInput(Player player, Roster.Entry entry) {
         attackInputs.put(player.getUniqueId(), entry);
         player.closeInventory();
-        plugin.msg(player, "attack-interval-input", "ticks", entry.attackIntervalTicks);
+        plugin.msg(player, "attack_interval_input", "ticks", entry.attackIntervalTicks);
     }
 
     @EventHandler(priority = EventPriority.HIGHEST)
@@ -289,24 +392,25 @@ final class Menus implements Listener {
             if (text.equalsIgnoreCase("cancel") || text.equals("取消")) { open(player, entry, "settings"); return; }
             if (requested < 20 || requested > 200) {
                 attackInputs.put(player.getUniqueId(), entry);
-                plugin.msg(player, "attack-interval-invalid");
+                plugin.msg(player, "attack_interval_invalid");
                 return;
             }
             entry.attackIntervalTicks = requested;
-            plugin.roster.dirty(entry);
-            plugin.roster.save();
-            entry.wakeWork();
-            plugin.msg(player, "attack-interval-set", "ticks", requested);
+            plugin.settingsChanged(entry);
+            plugin.msg(player, "attack_interval_set", "ticks", requested);
             open(player, entry, "settings");
         }, null, 1);
     }
 
     private void beginDirection(Player player, Roster.Entry entry) {
         DummyPlayers.Live active = plugin.live.get(entry.id);
-        if (active == null || active.dead) { plugin.msg(player, "direction-offline"); return; }
+        if ((active == null || active.dead) && plugin.roster.remoteHolder(entry) == null) {
+            plugin.msg(player, "direction_offline");
+            return;
+        }
         directionInputs.put(player.getUniqueId(), entry);
         player.closeInventory();
-        plugin.msg(player, "direction-capture");
+        plugin.msg(player, "direction_capture");
     }
 
     @EventHandler(priority = EventPriority.HIGHEST)
@@ -318,9 +422,16 @@ final class Menus implements Listener {
         event.setCancelled(true);
         float yaw = player.getLocation().getYaw();
         DummyPlayers.Live active = plugin.live.get(entry.id);
+        if ((active == null || active.dead) && plugin.allowed(player, entry) && plugin.forwardDirection(entry, yaw)) {
+            player.getScheduler().execute(plugin, () -> {
+                plugin.msg(player, "direction_set", "slot", entry.key.slot());
+                if (plugin.allowed(player, entry)) open(player, entry, "settings");
+            }, null, 1);
+            return;
+        }
         if (active == null || active.dead || !plugin.allowed(player, entry)) {
             player.getScheduler().execute(plugin, () -> {
-                plugin.msg(player, "direction-offline");
+                plugin.msg(player, "direction_offline");
                 if (plugin.allowed(player, entry)) open(player, entry, "settings");
             }, null, 1);
             return;
@@ -331,11 +442,11 @@ final class Menus implements Listener {
             plugin.saveDirection(entry, yaw);
             player.getScheduler().execute(plugin, () -> {
                 if (!plugin.allowed(player, entry)) return;
-                plugin.msg(player, "direction-set", "slot", entry.key.slot());
+                plugin.msg(player, "direction_set", "slot", entry.key.slot());
                 open(player, entry, "settings");
             }, null, 1);
         }, () -> player.getScheduler().execute(plugin, () -> {
-            plugin.msg(player, "direction-offline");
+            plugin.msg(player, "direction_offline");
             if (plugin.allowed(player, entry)) open(player, entry, "settings");
         }, null, 1), 1);
         if (!queued) directionInputs.remove(player.getUniqueId(), entry);
@@ -344,7 +455,8 @@ final class Menus implements Listener {
     @EventHandler
     public void onQuit(PlayerQuitEvent event) {
         UUID player = event.getPlayer().getUniqueId();
-        viewers.remove(player);
+        View view = viewers.remove(player);
+        if (view != null) maybeRelease(view.entry);
         directionInputs.remove(player);
         attackInputs.remove(player);
     }
@@ -352,7 +464,7 @@ final class Menus implements Listener {
     private void transfer(InventoryClickEvent event, Player player, View view, int raw, int remote, ItemStack current) {
         ItemStack cursor = DummyPlayers.copy(event.getView().getCursor());
         boolean right = event.getClick() == ClickType.RIGHT;
-        if (cursor != null && !accepts(remote, cursor)) { plugin.msg(player, "wrong-equipment"); return; }
+        if (cursor != null && !accepts(remote, cursor)) { plugin.msg(player, "wrong_equipment"); return; }
         boolean equipment = remote >= 36 && remote < 40;
         if (cursor == null && current == null) return;
         ItemStack next;
@@ -375,7 +487,7 @@ final class Menus implements Listener {
             hand = current;
         }
         if (!plugin.replaceItem(view.entry, remote, current, next)) { refreshItems(view); return; }
-        view.inventory.setItem(raw, DummyPlayers.copy(next));
+        display(view, raw, remote, DummyPlayers.copy(next));
         event.getView().setCursor(hand);
     }
 
@@ -405,7 +517,7 @@ final class Menus implements Listener {
         ItemStack next = remainder(current, current.getAmount() - remaining);
         if (!plugin.replaceItem(view.entry, remote, current, next)) { refreshItems(view); return; }
         inventory.setStorageContents(storage);
-        view.inventory.setItem(raw, DummyPlayers.copy(next));
+        display(view, raw, remote, DummyPlayers.copy(next));
     }
 
     private static ItemStack remainder(ItemStack item, int consumed) {
@@ -434,7 +546,9 @@ final class Menus implements Listener {
     }
 
     @EventHandler public void onClose(InventoryCloseEvent event) {
-        if (event.getInventory().getHolder() instanceof View view) viewers.remove(view.viewer, view);
+        if (!(event.getInventory().getHolder() instanceof View view)) return;
+        viewers.remove(view.viewer, view);
+        maybeRelease(view.entry);
     }
 
     void close(Roster.Entry entry) {
@@ -444,11 +558,12 @@ final class Menus implements Listener {
     void closeAll() { List.copyOf(viewers.values()).forEach(this::close); }
 
     private void close(View view) {
+        Runnable forget = () -> { if (viewers.remove(view.viewer, view)) maybeRelease(view.entry); };
         Player player = Bukkit.getPlayer(view.viewer);
-        if (player == null) viewers.remove(view.viewer, view);
-        else player.getScheduler().execute(plugin, () -> {
+        if (player == null) forget.run();
+        else if (!player.getScheduler().execute(plugin, () -> {
             if (player.getOpenInventory().getTopInventory() == view.inventory) player.closeInventory();
-            viewers.remove(view.viewer, view);
-        }, () -> viewers.remove(view.viewer, view), 1);
+            forget.run();
+        }, forget, 1)) forget.run();
     }
 }

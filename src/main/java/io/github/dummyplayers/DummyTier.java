@@ -13,15 +13,6 @@ enum DummyTier {
         this.defaultChunkSize = defaultChunkSize;
     }
 
-    static DummyTier fromCommand(String command) {
-        return switch (command.toLowerCase(java.util.Locale.ROOT)) {
-            case "spawn", "spawnnormal", "normal" -> NORMAL;
-            case "spawnpro", "pro" -> PRO;
-            case "spawnpromax", "promax" -> PROMAX;
-            default -> null;
-        };
-    }
-
     static DummyTier fromName(String name) {
         return switch (name.toLowerCase(java.util.Locale.ROOT)) {
             case "normal" -> NORMAL;

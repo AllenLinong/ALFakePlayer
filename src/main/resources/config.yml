@@ -1,58 +1,121 @@
-config-version: 5
+config_version: 6
+
+# ============================================================
+# ALFakePlayer 主配置文件 (config.yml)
+# ============================================================
+# 数据库（SQLite / MySQL）与 Redis 设置在同目录的 database.yml
+# 菜单布局在 menus/ 目录，消息文本在 lang/ 目录
+# 所有修改都需要重启服务器才会生效
+# ============================================================
+
+# ── 服务器标识 ────────────────────────────────────────────
+# 本服在跨服网络中的唯一 ID，必须与 BungeeCord/Velocity 配置中的子服名称一致
+# 跨服传送会按这个 ID 把玩家送到假人所在的子服；每个子服必须不同
+# 单服部署可保持默认值
+# 重要：跨服前先改好此值。接入跨服后若改动，旧 ID 下仍在运行的假人
+#       要等 database.yml 中 sync.timeout_seconds 超时后才能被其他子服接管
+server_id: "server"
+# 这个服务器显示的名字，仅用于菜单和消息展示
+server_name: "一号服务器"
+
+# ── 语言 ──────────────────────────────────────────────────
+# 消息与指令帮助的语言：zh_CN（简体中文）或 en_US（English）
 language: zh_CN
 
+# ── 假人栏位 ──────────────────────────────────────────────
 slots:
+  # 新玩家默认解锁的栏位数。玩家仍需购买或由管理员发放假人
   default: 1
-  max-per-owner: 10
-  max-active-server: 20
+  # 每名玩家最多拥有的假人数量（1–100）
+  max_per_owner: 10
+  # 本服同时在线的假人上限（1–200）；跨服时每个子服分别计算
+  max_active_server: 20
 
-# 购买一个假人，不是召唤费用。free 免费 / coins 金币 / points 点券 / items 物品。
+# ── 购买假人 ──────────────────────────────────────────────
+# 购买得到一个新的未召唤假人，与每次召唤的费用（economy）无关
+# 金币、点券和物品可以同时要求，玩家必须全部满足才能购买，例如 300 金币 + 50 点券
+# 所需物品不写在本文件：请在游戏内用 /afp items 设置（最多三组，完整匹配物品数据），
+# 保存在数据库中，跨服时所有子服共用，设置后立即生效，不会改写配置文件
+# 金币、点券都为 0 且没有设置物品时，购买免费
 purchase:
-  mode: free
+  # 金币价格，需要 Vault 和经济插件；0 为不收金币
   coins: 300.0
-  points: 100
-  # 使用 /afp purchaseitems 设置，最多三叠，完整匹配物品数据。
-  items: []
+  # 点券价格，需要 PlayerPoints；0 为不收点券
+  points: 0
 
+# ── 权限组 ──────────────────────────────────────────────
 luckperms:
+  # 召唤时让假人加入的 LuckPerms 权限组，该组必须已存在；未安装 LuckPerms 时忽略
+  # 不要给这个组配置管理权限或领地绕过权限
   group: 'default'
 
+# ── 召唤费用 ──────────────────────────────────────────────
 economy:
-  enabled: false
-  # 兼容旧配置。当前各档位的召唤费用由 tier-prices 设置。
-  summon-price: 300.0
-  tier-prices:
+  # 是否对每次召唤收费（包括死亡后重新召唤），需要 Vault 和经济插件
+  # 开启后，选择档位时会先打开召唤确认菜单；把跨服运行中的假人召回本服不再收费
+  # 没有 Vault 经济服务时无法召唤，请安装经济插件或改为 false
+  enabled: true
+  # 旧版单一价格，只在从旧配置升级时用来填充各档位价格；请修改下面的 tier_prices
+  summon_price: 300.0
+  # 各档位每次召唤的金币价格（不能为负数）
+  tier_prices:
     normal: 300.0
     pro: 600.0
     promax: 1000.0
 
+# ── 传送 ──────────────────────────────────────────────────
+# 权限 alfakeplayer.teleport.bypass（默认 OP）可跳过等待和冷却
 teleport:
-  to-dummy-delay-seconds: 5
-  to-dummy-cooldown-seconds: 5
+  # /afp tp 传送到假人前的等待秒数（0–300），0 为立即传送
+  to_dummy_delay_seconds: 5
+  # /afp tp 成功后的冷却秒数（0–300），0 为无冷却；按玩家计算，跨服传送同样适用
+  to_dummy_cooldown_seconds: 5
 
+# ── 性能 ──────────────────────────────────────────────────
 performance:
-  simulation-distance: 2
-  # 假人的最大视距（区块半径）。Pro Max 的 10 档对应 9×9 区块。
-  view-distance: 4
-  dummy-chunks:
+  # 假人的模拟距离（区块半径，2 至 view_distance）
+  simulation_distance: 2
+  # 假人视距的半径上限（区块，2–10）；各档位的实际范围不会超过它
+  view_distance: 4
+  # 各档位加载的区块边长（5–10）。实际半径 = (边长 - 1) / 2，
+  # 所以 10 实际为 9×9，同时还受 view_distance 限制
+  dummy_chunks:
     normal: 5
     pro: 7
     promax: 10
-  idle-target-interval-ticks: 3
-  idle-target-max-ticks: 20
-  use-interval-ticks: 4
-  save-interval-ticks: 200
+  # 找不到工作目标时的初始扫描间隔（tick，1–20）
+  idle_target_interval_ticks: 3
+  # 持续找不到目标时，扫描间隔逐步放慢到的上限（tick）
+  idle_target_max_ticks: 20
+  # 放置方块的最短间隔（tick，最少 4）
+  use_interval_ticks: 4
+  # 把假人背包和设置定时写入数据库的间隔（tick，40–12000）；只写入有变化的数据
+  save_interval_ticks: 200
+  # 假人是否像真人一样让周围自然生成生物（刷怪塔需要开启）
+  # 关闭可明显减轻假人多时的刷怪和实体负载，但依赖假人的刷怪塔将不再出怪
+  affects_spawning: true
 
+# ── 搬运货物 ──────────────────────────────────────────────
 unloading:
+  # 全局开关。开启后，假人在「行为设置」中开启「搬运货物」时，
+  # 会把主背包的物品放进同高度、水平相邻的箱子
   enabled: true
-  interval-ticks: 40
-  max-retry-ticks: 160
+  # 卸货检查间隔（tick，20–1200）
+  interval_ticks: 40
+  # 箱子装满或无法打开时，重试间隔逐步放慢到的上限（tick）
+  max_retry_ticks: 160
 
+# ── 生存 ──────────────────────────────────────────────────
 survival:
-  ignore-hostile-mobs: true
-  auto-eat-at-food-level: 2
-  minimum-tool-durability: 1
-  food-blacklist:
+  # true：敌对怪物不会锁定假人，怪物的近战和弹射物伤害会被拦截
+  # 饥饿、窒息等环境伤害和真人攻击不受影响；设为 false 恢复原版行为
+  ignore_hostile_mobs: true
+  # 饱食度（0–20 点，2 点为一格鸡腿）不高于该值时，假人用副手进食
+  auto_eat_at_food_level: 2
+  # 工具剩余耐久不高于该值时停用并换下，防止工具损坏（最少 1）
+  minimum_tool_durability: 1
+  # 假人不会主动食用的食物
+  food_blacklist:
     - ROTTEN_FLESH
     - BEEF
     - PORKCHOP
@@ -63,6 +126,7 @@ survival:
     - SALMON
     - TROPICAL_FISH
     - PUFFERFISH
-  # 设为 0 时，静止不动的假人不会因站着而掉饱食度。
-  passive-exhaustion-per-second: 0.1
-  lethal-starvation-any-non-peaceful-difficulty: true
+  # 假人每秒额外的饥饿消耗（0–4）。设为 0 时，静止的假人不会因站着而掉饱食度
+  passive_exhaustion_per_second: 0.1
+  # true：简单和普通难度下饥饿也会致死（原版只在困难难度致死）
+  lethal_starvation_any_non_peaceful_difficulty: true

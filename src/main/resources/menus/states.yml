@@ -1,6 +1,17 @@
-config-version: 3
+config_version: 4
+
+# 公共状态文字 — 各菜单占位符使用的文字，颜色代码使用 & 符号
+#   enabled / disabled   开关状态 %state%
+#   summoned             在本服运行
+#   summoned_remote      在其他子服运行（%server% 为子服名称）
+#   not_summoned         未召唤
+#   not_set              未设置放置方块时的 %placement_block%
+#   auto_tool            %tool% 的显示文字
 states:
-  enabled: '&a已开启'
-  disabled: '&c已关闭'
-  summoned: '&a已召唤'
-  not-summoned: '&7未召唤'
+  enabled: "&a已开启"
+  disabled: "&c已关闭"
+  summoned: "&a已召唤"
+  summoned_remote: "&b在 %server% 运行"
+  not_summoned: "&7未召唤"
+  not_set: "&7未设置"
+  auto_tool: "&f自动匹配"

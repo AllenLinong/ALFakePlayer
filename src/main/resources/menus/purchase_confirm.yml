@@ -1,0 +1,55 @@
+config_version: 6
+
+# 购买确认 — 在主菜单点击「购买假人」后打开
+#
+# 布局：shape 每行 9 个字符（1–6 行），每个字符是一个格子，"." 为空格子；用到的字符在 items 中定义
+# 颜色代码使用 & 符号；name 为名称，lore 为描述
+#
+# 菜单图标写法：
+# 1. 原版物品：
+#    type: BEACON
+# 2. 资源包 CustomModelData：
+#    type: PAPER
+#    custom_model_data: 10001
+# 3. CraftEngine 自定义物品（推荐）：
+#    craftengine: "namespace:item_id"
+# 4. ItemsAdder 自定义物品：
+#    itemsadder: "namespace:item_id"
+# 兼容写法：
+#    plugin_item: "ce:namespace:item_id"
+#    plugin_item: "ia:namespace:item_id"
+#    type: "ce:namespace:item_id"
+# 使用自定义物品时，type 是备用外观：对应插件未安装或找不到物品时显示 type。
+# 注意：命名空间和物品ID之间必须使用英文半角冒号 ":"，不要使用中文全角冒号 "："。
+#
+# action：confirm 确认购买 / cancel 返回主菜单 / close 关闭菜单 / none 无动作
+# 占位符：%purchase_cost% 单独占一行时显示购买价格（金币、点券、物品，可多行）
+purchase_confirm:
+  title: "&0购买假人"
+  shape:
+    - "#########"
+    - "##C###Y##"
+    - "#########"
+  items:
+    C:
+      type: BARRIER
+      name: "&c返回"
+      lore:
+        - "&6▶ &8操作"
+        - "&7•&a鼠标左键&a➤&f取消并返回假人列表"
+      action: "cancel"
+    Y:
+      type: EMERALD
+      name: "&a确认购买"
+      lore:
+        - "&6▶ &8购买信息"
+        - "&a▸&7购买后不会立即召唤"
+        - "%purchase_cost%"
+        - ""
+        - "&6▶ &8操作"
+        - "&7•&a鼠标左键&a➤&f确认购买"
+      action: "confirm"
+    "#":
+      type: GRAY_STAINED_GLASS_PANE
+      name: " "
+      action: "none"

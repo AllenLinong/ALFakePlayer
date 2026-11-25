@@ -1,0 +1,82 @@
+config_version: 1
+
+# ============================================================
+# ALFakePlayer 数据库与跨服配置文件 (database.yml)
+# ============================================================
+# 此文件仅在以下场景需要修改：
+#   1. 使用 MySQL 替代默认的 SQLite 数据库
+#   2. 多个子服共享假人数据，进行跨服管理和跨服召唤（需要 MySQL，推荐同时启用 Redis）
+# 单服务器使用 SQLite 时无需修改此文件
+# 服务器 ID 与显示名称在 config.yml 的 server_id 和 server_name 中设置
+# 修改后需要重启服务器才会生效
+# ============================================================
+
+# ── 数据库设置 ────────────────────────────────────────────
+database:
+  # 数据库类型：sqlite（本地单文件）或 mysql（远程服务器/跨服共享）
+  # 跨服模式必须使用 mysql，所有子服连接同一个数据库并使用相同的表前缀
+  # 从 sqlite 切换到 mysql 时，本服的 players.db 会在 MySQL 为空时自动导入一次，原文件保留
+  type: "sqlite"
+
+  # ── SQLite 设置（type=sqlite 时生效）────────────────────
+  # 数据库文件名，位于 plugins/ALFakePlayer/ 目录
+  file: "players.db"
+
+  # ── MySQL 连接信息（type=mysql 时填写）──────────────────
+  # 数据库服务器地址
+  host: "localhost"
+  # 数据库端口
+  port: 3306
+  # 数据库名称（需提前创建，建议字符集 utf8mb4）
+  database: "alfakeplayer"
+  # 数据库用户名
+  username: "alfakeplayer"
+  # 数据库密码
+  password: "password"
+  # 附加的 JDBC 连接参数。使用 SSL 时把 useSSL 改为 true
+  parameters: "useUnicode=true&characterEncoding=utf8&useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC"
+
+  # 数据表名前缀，方便在数据库中快速找到本插件的数据表（只能使用字母、数字和下划线，不能为空）
+  # 例如默认值会创建 afp_dummies、afp_inventory、afp_sessions 等表
+  prefix: "afp_"
+
+  # ── 连接池配置（仅 MySQL 生效）─────────────────────────
+  pool:
+    # 连接池最大连接数
+    maximum_pool_size: 6
+    # 连接池最小空闲连接数
+    minimum_idle: 2
+    # 获取连接超时时间（毫秒）
+    connection_timeout: 10000
+    # 空闲连接回收时间（毫秒）
+    idle_timeout: 600000
+    # 连接最大存活时间（毫秒），应小于 MySQL 的 wait_timeout
+    max_lifetime: 1800000
+
+# ── Redis 设置（跨服通信）────────────────────────────────
+redis:
+  # 是否启用 Redis 跨服通信（仅 type=mysql 时生效）
+  # 启用后跨服召回、收回和传送几乎即时生效；
+  # 未启用时通过 MySQL 轮询传递跨服指令，延迟约为 sync.poll_interval_millis
+  enabled: false
+
+  # Redis 服务器地址
+  host: "localhost"
+  # Redis 端口
+  port: 6379
+  # Redis 密码（无密码留空）
+  password: ""
+  # 消息频道名（所有互联的服务器必须使用相同的频道名）
+  channel: "alfakeplayer_channel"
+
+# ── 跨服同步（仅 type=mysql 时生效）──────────────────────
+sync:
+  # 每个子服向数据库报告自己在线的间隔（秒，5–60）
+  heartbeat_seconds: 10
+  # 超过该秒数没有心跳的子服视为离线，它占用的假人可以被其他子服接管（秒，不小于心跳间隔的 3 倍）
+  # 设得太小可能在数据库短暂卡顿时误判；设得太大会让崩溃子服的假人更久才能被召回
+  timeout_seconds: 60
+  # 未启用 Redis 时检查跨服指令的间隔（毫秒，200–5000）
+  poll_interval_millis: 1000
+  # 等待其他子服回应的最长时间（秒，3–60），例如召回或收回在其他子服运行的假人
+  request_timeout_seconds: 10

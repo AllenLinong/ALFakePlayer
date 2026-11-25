@@ -1,104 +1,132 @@
-config-version: 5
+config_version: 6
+
+# 行为设置 — 在假人背包中点击「行为设置」打开；假人在其他子服运行时，修改会自动同步到该子服
+#
+# 布局：shape 每行 9 个字符（1–6 行），每个字符是一个格子，"." 为空格子；用到的字符在 items 中定义
+# 颜色代码使用 & 符号；name 为名称，lore 为描述
+#
+# 菜单图标写法：
+# 1. 原版物品：
+#    type: BEACON
+# 2. 资源包 CustomModelData：
+#    type: PAPER
+#    custom_model_data: 10001
+# 3. CraftEngine 自定义物品（推荐）：
+#    craftengine: "namespace:item_id"
+# 4. ItemsAdder 自定义物品：
+#    itemsadder: "namespace:item_id"
+# 兼容写法：
+#    plugin_item: "ce:namespace:item_id"
+#    plugin_item: "ia:namespace:item_id"
+#    type: "ce:namespace:item_id"
+# 使用自定义物品时，type 是备用外观：对应插件未安装或找不到物品时显示 type。
+# 注意：命名空间和物品ID之间必须使用英文半角冒号 ":"，不要使用中文全角冒号 "："。
+#
+# action：toggle:mine 挖掘 / toggle:attack 攻击（右键输入间隔，Shift+左/右键调整）
+#         toggle:use 放置 / toggle:unload 搬运货物 / toggle:pushable 允许被推动
+#         toggle:sneak 保持蹲姿 / direction 设置工作方向 / select:placement 设置放置方块
+#         open_gui:inventory 返回背包 / close 关闭菜单
+# 占位符：%state% 开关状态、%attack_interval% 攻击间隔、%placement_block% 放置方块、%name% 假人名字
 settings:
-  title: '&0行为设置 &8· &0%name%'
+  title: "&0行为设置 &8· &0%name%"
   shape:
-    - '#########'
-    - '#M#A#U#C#'
-    - '##P#D#S##'
-    - 'R########'
+    - "#########"
+    - "#M#A#U#C#"
+    - "##P#D#S##"
+    - "R########"
   items:
-    '#':
-      type: GRAY_STAINED_GLASS_PANE
-      name: ' '
     M:
       type: IRON_PICKAXE
-      name: '&e&l挖掘'
+      name: "&e&l挖掘"
       lore:
-        - '&6▶ &8挖掘设置'
-        - '&a▸&7状态：%state%'
-        - '&a▸&7只挖正前方一列，先尝试上格，再尝试下格'
-        - '&a▸&7快捷栏有方块时，只挖同类方块'
-        - '&a▸&7自动选择符合采集等级的工具'
-        - ''
-        - '&6▶ &8操作'
-        - '&7•&a鼠标左键&a➤&f开启或关闭'
-      action: 'toggle:mine'
+        - "&6▶ &8挖掘设置"
+        - "&a▸&7状态：%state%"
+        - "&a▸&7只挖正前方一列，先尝试上格，再尝试下格"
+        - "&a▸&7快捷栏有方块时，只挖同类方块"
+        - "&a▸&7自动选择符合采集等级的工具"
+        - ""
+        - "&6▶ &8操作"
+        - "&7•&a鼠标左键&a➤&f开启或关闭"
+      action: "toggle:mine"
     A:
       type: IRON_SWORD
-      name: '&c&l攻击'
+      name: "&c&l攻击"
       lore:
-        - '&6▶ &8攻击设置'
-        - '&a▸&7状态：%state%'
-        - '&a▸&7攻击间隔：&f%attack_interval% tick &8（默认和最短 20）'
-        - '&a▸&7范围内有目标则攻击，没目标也会挥手'
-        - ''
-        - '&6▶ &8操作'
-        - '&7•&a鼠标左键&a➤&f开启或关闭'
-        - '&7•&e鼠标右键&a➤&f输入攻击间隔'
-        - '&7•&bShift+左键&a➤&f减少 20 tick'
-        - '&7•&bShift+右键&a➤&f增加 20 tick'
-      action: 'toggle:attack'
+        - "&6▶ &8攻击设置"
+        - "&a▸&7状态：%state%"
+        - "&a▸&7攻击间隔：&f%attack_interval% tick &8（默认和最短 20）"
+        - "&a▸&7范围内有目标则攻击，没目标也会挥手"
+        - ""
+        - "&6▶ &8操作"
+        - "&7•&a鼠标左键&a➤&f开启或关闭"
+        - "&7•&e鼠标右键&a➤&f输入攻击间隔"
+        - "&7•&bShift+左键&a➤&f减少 20 tick"
+        - "&7•&bShift+右键&a➤&f增加 20 tick"
+      action: "toggle:attack"
     U:
       type: GRASS_BLOCK
-      name: '&a&l放置'
+      name: "&a&l放置"
       lore:
-        - '&6▶ &8放置设置'
-        - '&a▸&7状态：%state%'
-        - '&a▸&7当前方块：&f%placement_block%'
-        - '&a▸&7在背包第五行设定放置方块'
-        - ''
-        - '&6▶ &8操作'
-        - '&7•&a鼠标左键&a➤&f开启或关闭'
-      action: 'toggle:use'
+        - "&6▶ &8放置设置"
+        - "&a▸&7状态：%state%"
+        - "&a▸&7当前方块：&f%placement_block%"
+        - "&a▸&7在背包第五行设定放置方块"
+        - ""
+        - "&6▶ &8操作"
+        - "&7•&a鼠标左键&a➤&f开启或关闭"
+      action: "toggle:use"
     C:
       type: CHEST
-      name: '&6&l搬运货物'
+      name: "&6&l搬运货物"
       lore:
-        - '&6▶ &8搬运设置'
-        - '&a▸&7状态：%state%'
-        - '&a▸&7把主背包货物搬到相邻箱子'
-        - '&a▸&7保留快捷栏、副手和装备'
-        - ''
-        - '&6▶ &8操作'
-        - '&7•&a鼠标左键&a➤&f开启或关闭'
-      action: 'toggle:unload'
+        - "&6▶ &8搬运设置"
+        - "&a▸&7状态：%state%"
+        - "&a▸&7把主背包货物搬到相邻箱子"
+        - "&a▸&7保留快捷栏、副手和装备"
+        - ""
+        - "&6▶ &8操作"
+        - "&7•&a鼠标左键&a➤&f开启或关闭"
+      action: "toggle:unload"
     D:
       type: COMPASS
-      name: '&b&l工作方向'
+      name: "&b&l工作方向"
       lore:
-        - '&6▶ &8工作方向'
-        - '&a▸&7关闭菜单后，朝目标方向挥手一次'
-        - '&a▸&7只记录水平方向，设好后自动返回'
-        - ''
-        - '&6▶ &8操作'
-        - '&7•&a鼠标左键&a➤&f开始设置'
-      action: 'direction'
+        - "&6▶ &8工作方向"
+        - "&a▸&7关闭菜单后，朝目标方向挥手一次"
+        - "&a▸&7只记录水平方向，设好后自动返回"
+        - ""
+        - "&6▶ &8操作"
+        - "&7•&a鼠标左键&a➤&f开始设置"
+      action: "direction"
     P:
       type: PISTON
-      name: '&b&l允许被推动'
+      name: "&b&l允许被推动"
       lore:
-        - '&6▶ &8推动设置'
-        - '&a▸&7状态：%state%'
-        - '&a▸&7关闭后，实体碰撞不会推动假人'
-        - ''
-        - '&6▶ &8操作'
-        - '&7•&a鼠标左键&a➤&f开启或关闭'
-      action: 'toggle:pushable'
+        - "&6▶ &8推动设置"
+        - "&a▸&7状态：%state%"
+        - "&a▸&7关闭后，实体碰撞不会推动假人"
+        - ""
+        - "&6▶ &8操作"
+        - "&7•&a鼠标左键&a➤&f开启或关闭"
+      action: "toggle:pushable"
     S:
       type: LEATHER_BOOTS
-      name: '&b&l保持蹲姿'
+      name: "&b&l保持蹲姿"
       lore:
-        - '&6▶ &8姿态设置'
-        - '&a▸&7状态：%state%'
-        - '&a▸&7开启后保持蹲姿，关闭后站立'
-        - ''
-        - '&6▶ &8操作'
-        - '&7•&a鼠标左键&a➤&f开启或关闭'
-      action: 'toggle:sneak'
+        - "&6▶ &8姿态设置"
+        - "&a▸&7状态：%state%"
+        - "&a▸&7开启后保持蹲姿，关闭后站立"
+        - ""
+        - "&6▶ &8操作"
+        - "&7•&a鼠标左键&a➤&f开启或关闭"
+      action: "toggle:sneak"
     R:
       type: ARROW
-      name: '&a&l返回背包'
+      name: "&a&l返回背包"
       lore:
-        - '&6▶ &8操作'
-        - '&7•&a鼠标左键&a➤&f返回背包'
-      action: 'open_gui:inventory'
+        - "&6▶ &8操作"
+        - "&7•&a鼠标左键&a➤&f返回背包"
+      action: "open_gui:inventory"
+    "#":
+      type: GRAY_STAINED_GLASS_PANE
+      name: " "
