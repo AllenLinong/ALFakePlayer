@@ -1,6 +1,7 @@
 package io.github.dummyplayers;
 
 import org.bukkit.configuration.ConfigurationSection;
+import org.bukkit.configuration.InvalidConfigurationException;
 import org.bukkit.configuration.file.YamlConfiguration;
 import org.bukkit.plugin.java.JavaPlugin;
 
@@ -15,6 +16,8 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
 import java.util.function.Consumer;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * 读取插件目录下的配置文件。文件不存在时写入默认文件；插件更新提高了某个文件的 config_version 时，
@@ -65,7 +68,14 @@ final class ConfigUpgrade {
         Path file = plugin.getDataFolder().toPath().resolve(name);
         if (Files.notExists(file)) return new Loaded(current, () -> plugin.saveResource(name, false));
 
-        YamlConfiguration saved = read(file);
+        YamlConfiguration saved;
+        try { saved = read(file); }
+        catch (InvalidConfigurationException invalid) {
+            // snakeyaml 的报错第一行不含文件名和行号，这里补上，方便在 reload 失败的提示里直接看到
+            Matcher at = Pattern.compile("line (\\d+), column (\\d+)").matcher(String.valueOf(invalid.getMessage()));
+            String where = at.find() ? " at line " + at.group(1) + ", column " + at.group(2) : "";
+            throw new IOException(name + ": invalid YAML" + where, invalid);
+        }
         int sourceVersion = version(saved, name);
         if (sourceVersion > targetVersion) {
             throw new IOException(name + " is from a newer plugin (version " + sourceVersion + "); file left unchanged");

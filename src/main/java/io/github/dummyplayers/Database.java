@@ -208,6 +208,15 @@ final class Database implements AutoCloseable {
 
     // ── 表结构 ────────────────────────────────────────────
 
+    private static boolean hasColumn(Connection connection, String table, String column) {
+        try (Statement statement = connection.createStatement()) {
+            statement.executeQuery("SELECT " + column + " FROM " + table + " WHERE 1 = 0").close();
+            return true;
+        } catch (SQLException missing) {
+            return false;
+        }
+    }
+
     void migrate() throws SQLException {
         String engine = mysql() ? " ENGINE=InnoDB DEFAULT CHARSET=utf8mb4" : "";
         String serial = mysql() ? "BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY" : "INTEGER PRIMARY KEY AUTOINCREMENT";
@@ -240,7 +249,12 @@ final class Database implements AutoCloseable {
                 + " FOREIGN KEY (dummy_id) REFERENCES " + table("dummies") + " (id) ON DELETE CASCADE)" + engine);
             execute(connection, "CREATE TABLE IF NOT EXISTS " + table("servers") + " ("
                 + "server_id VARCHAR(64) NOT NULL PRIMARY KEY, name VARCHAR(128) NOT NULL, instance VARCHAR(36) NOT NULL,"
-                + " live_count INT NOT NULL DEFAULT 0, heartbeat BIGINT NOT NULL)" + engine);
+                + " live_count INT NOT NULL DEFAULT 0, player_count INT NOT NULL DEFAULT 0, heartbeat BIGINT NOT NULL)" + engine);
+            // 早期建的表没有 player_count（各子服真实玩家数）。几个子服可能同时启动，加列失败时再确认一次是否已被别的子服加上
+            if (!hasColumn(connection, table("servers"), "player_count")) {
+                try { execute(connection, "ALTER TABLE " + table("servers") + " ADD COLUMN player_count INT NOT NULL DEFAULT 0"); }
+                catch (SQLException error) { if (!hasColumn(connection, table("servers"), "player_count")) throw error; }
+            }
             execute(connection, "CREATE TABLE IF NOT EXISTS " + table("purchase_items") + " ("
                 + "position INT NOT NULL PRIMARY KEY, item " + (mysql() ? "MEDIUMBLOB" : "BLOB") + " NOT NULL)" + engine);
             execute(connection, "CREATE TABLE IF NOT EXISTS " + table("messages") + " ("

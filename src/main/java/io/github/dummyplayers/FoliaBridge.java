@@ -49,7 +49,9 @@ final class FoliaBridge {
             Class<?> shutdownThread = Class.forName("io.papermc.paper.threadedregions.RegionShutdownThread");
             if (!shutdownThread.isInstance(thread)) return false;
 
-            Field context = shutdownThread.getField("shuttingDown");
+            // 该字段是包级私有的，getField 找不到，必须用 getDeclaredField
+            Field context = shutdownThread.getDeclaredField("shuttingDown");
+            context.setAccessible(true);
             Object previous = context.get(thread);
             Object regionizer = ServerLevel.class.getField("regioniser").get(dummy.level());
             var chunk = dummy.chunkPosition();

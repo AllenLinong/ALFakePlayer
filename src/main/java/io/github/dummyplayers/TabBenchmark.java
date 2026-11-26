@@ -14,6 +14,8 @@ import org.bukkit.craftbukkit.entity.CraftPlayer;
 import org.bukkit.entity.Player;
 
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -28,6 +30,8 @@ final class TabBenchmark {
     private final DummyPlayers plugin;
     private final Map<UUID, ServerGamePacketListenerImpl> viewers = new HashMap<>();
     private List<UUID> ids = List.of();
+    /** 当前的测试条目：UUID → 名字，按添加顺序。跨服时广播给其他子服显示。 */
+    private Map<UUID, String> names = Map.of();
     private ClientboundPlayerInfoUpdatePacket entries;
 
     TabBenchmark(DummyPlayers plugin) { this.plugin = plugin; }
@@ -56,6 +60,7 @@ final class TabBenchmark {
     private synchronized void replace(int count, Set<String> occupied) {
         var batch = new ArrayList<Entry>(count);
         var newIds = new ArrayList<UUID>(count);
+        var newNames = new LinkedHashMap<UUID, String>();
         for (int index = 0; index < count; index++) {
             UUID id;
             String name;
@@ -66,13 +71,20 @@ final class TabBenchmark {
             var profile = new GameProfile(id, name);
             batch.add(new Entry(id, profile, true, 0, GameType.SURVIVAL, null, true, 0, null));
             newIds.add(id);
+            newNames.put(id, name);
         }
         clear();
         ids = List.copyOf(newIds);
+        names = Collections.unmodifiableMap(newNames);
         entries = new ClientboundPlayerInfoUpdatePacket(EnumSet.of(Action.ADD_PLAYER, Action.UPDATE_LISTED,
             Action.UPDATE_GAME_MODE, Action.UPDATE_LATENCY, Action.UPDATE_HAT), List.copyOf(batch));
         send(entries);
     }
+
+    synchronized int count() { return ids.size(); }
+
+    /** 当前测试条目（UUID → 名字）的快照。 */
+    synchronized Map<UUID, String> entries() { return names; }
 
     synchronized void join(Player player) {
         if (!(player instanceof CraftPlayer viewer) || viewer.getHandle() instanceof NativeDummy) return;
@@ -89,6 +101,7 @@ final class TabBenchmark {
         int count = ids.size();
         if (count != 0) send(new ClientboundPlayerInfoRemovePacket(ids));
         ids = List.of();
+        names = Map.of();
         entries = null;
         return count;
     }

@@ -23,22 +23,26 @@ import java.util.*;
 final class Menus implements Listener {
     private record Button(MenuItem item, String name, List<String> lore, String action) { }
     /** empty：装备栏和副手为空时显示的占位图标，键为物品栏编号（36 靴子 … 39 头盔，40 副手）。 */
-    private record Layout(String title, int[] slots, Map<Integer, Button> buttons, Map<Integer, Button> empty) { }
+    private record Layout(String name, String title, int[] slots, Map<Integer, Button> buttons, Map<Integer, Button> empty) {
+        boolean inventory() { return name.equals("inventory"); }
+    }
     private static final String EMPTY_SLOT = "empty_slot";
     private static final Map<String, Integer> EMPTY_SLOTS = Map.of("helmet", 39, "chestplate", 38, "leggings", 37, "boots", 36, "offhand", 40);
     private final DummyPlayers plugin;
-    private final Map<String, Layout> layouts = new HashMap<>();
+    private volatile Map<String, Layout> layouts;
     private final Map<UUID, View> viewers = new java.util.concurrent.ConcurrentHashMap<>();
     private final Map<UUID, Roster.Entry> directionInputs = new java.util.concurrent.ConcurrentHashMap<>();
     private final Map<UUID, Roster.Entry> attackInputs = new java.util.concurrent.ConcurrentHashMap<>();
-    private final NamespacedKey actionKey, objectKey;
-    private final String enabled, disabled, notSet, autoTool;
+    private final NamespacedKey actionKey, objectKey, copyKey;
+    private volatile String enabled, disabled, notSet, autoTool;
 
     private static final class View implements InventoryHolder {
         final Roster.Entry entry;
         final UUID viewer;
         final Layout layout;
         final Inventory inventory;
+        /** 每个界面格子当前显示的真实物品（不带副本标记）；空格子和占位图标为 null。 */
+        final ItemStack[] shown;
         long displayedRevision = -1;
         boolean local, acquiring;
         int age;
@@ -47,6 +51,7 @@ final class Menus implements Listener {
             this.entry = entry;
             this.viewer = viewer;
             this.layout = layout;
+            shown = new ItemStack[layout.slots.length];
             inventory = Bukkit.createInventory(this, layout.slots.length,
                 DummyPlayers.TEXT.deserialize(layout.title).replaceText(builder -> builder
                     .matchLiteral("%name%").replacement(Component.text(entry.name()))));
@@ -59,14 +64,20 @@ final class Menus implements Listener {
         this.plugin = plugin;
         actionKey = new NamespacedKey(plugin, "gui_action");
         objectKey = new NamespacedKey(plugin, "object_id");
+        copyKey = new NamespacedKey(plugin, "display_copy");
+        reload(yaml);
+    }
+
+    static void validate(YamlConfiguration yaml) { readLayouts(yaml); }
+
+    /** 换用新的菜单配置（已校验）。已打开的界面仍使用打开时的布局。 */
+    void reload(YamlConfiguration yaml) {
         enabled = yaml.getString("states.enabled", "&a开启");
         disabled = yaml.getString("states.disabled", "&c关闭");
         notSet = yaml.getString("states.not_set", "&7未设置");
         autoTool = yaml.getString("states.auto_tool", "&f自动匹配");
-        layouts.putAll(readLayouts(yaml));
+        layouts = readLayouts(yaml);
     }
-
-    static void validate(YamlConfiguration yaml) { readLayouts(yaml); }
 
     private static Map<String, Layout> readLayouts(YamlConfiguration yaml) {
         Map<String, Layout> layouts = new HashMap<>();
@@ -110,9 +121,9 @@ final class Menus implements Listener {
                 try { empty.put(slot, new Button(MenuItem.read(item), item.getString("name", " "), item.getStringList("lore"), EMPTY_SLOT)); }
                 catch (IllegalArgumentException invalid) { throw bad(name, "empty_slots." + key + ": " + invalid.getMessage()); }
             }
-            layouts.put(name, new Layout(section.getString("title", "%name%"), slots, Map.copyOf(buttons), Map.copyOf(empty)));
+            layouts.put(name, new Layout(name, section.getString("title", "%name%"), slots, Map.copyOf(buttons), Map.copyOf(empty)));
         }
-        return layouts;
+        return Map.copyOf(layouts);
     }
 
     private static IllegalArgumentException bad(String section, String reason) {
@@ -161,9 +172,10 @@ final class Menus implements Listener {
         player.getScheduler().runAtFixedRate(plugin, task -> {
             if (viewers.get(view.viewer) != view) { task.cancel(); return; }
             if (!plugin.allowed(player, view.entry)) { player.closeInventory(); return; }
+            purge(player);
             boolean local = plugin.editable(view.entry);
             if (local || local != view.local || view.displayedRevision != view.entry.inventoryRevision) refreshItems(view);
-            if (view.layout == layouts.get("inventory") && !plugin.roster.holds(view.entry) && ++view.age % 4 == 0) {
+            if (view.layout.inventory() && !plugin.roster.holds(view.entry) && ++view.age % 4 == 0) {
                 remoteRefresh(player, view);
             }
         }, () -> { if (viewers.remove(view.viewer, view)) maybeRelease(view.entry); }, 10, 10);
@@ -189,8 +201,7 @@ final class Menus implements Listener {
 
     /** 本服是否有玩家正在背包界面中编辑该假人。 */
     boolean editing(Roster.Entry entry) {
-        Layout inventory = layouts.get("inventory");
-        for (View view : viewers.values()) if (view.entry == entry && view.layout == inventory) return true;
+        for (View view : viewers.values()) if (view.entry == entry && view.layout.inventory()) return true;
         return false;
     }
 
@@ -249,6 +260,7 @@ final class Menus implements Listener {
         ItemStack shown = view.inventory.getItem(index);
         Button empty = item == null ? view.layout.empty.get(remote) : null;
         if (empty != null) {
+            view.shown[index] = null;
             if (!placeholder(shown)) {
                 ItemStack icon = empty.item.create();
                 icon.editMeta(meta -> {
@@ -260,7 +272,52 @@ final class Menus implements Listener {
             }
             return;
         }
-        if (!Objects.equals(shown, item)) view.inventory.setItem(index, DummyPlayers.copy(item));
+        // 界面里放的是带标记的副本。只在内容变化或界面格子被改动过时重新放入，避免每次刷新都复制物品
+        boolean intact = item == null ? shown == null || shown.isEmpty()
+            : shown != null && shown.getType() == item.getType() && shown.getAmount() == item.getAmount();
+        if (intact && Objects.equals(view.shown[index], item)) return;
+        view.shown[index] = DummyPlayers.copy(item);
+        view.inventory.setItem(index, item == null ? null : marked(item));
+    }
+
+    /** 界面显示用的副本：真正的物品只在假人背包里，带这个标记的物品出现在玩家身上时会被删除。 */
+    private ItemStack marked(ItemStack item) {
+        ItemStack copy = item.clone();
+        copy.editPersistentDataContainer(data -> data.set(copyKey, PersistentDataType.BYTE, (byte) 1));
+        return copy;
+    }
+
+    /** 菜单图标或背包界面的显示副本。正常操作拿不到，出现在玩家身上说明被其他插件或漏洞带了出来。 */
+    boolean menuItem(ItemStack stack) {
+        if (stack == null || stack.isEmpty()) return false;
+        var data = stack.getPersistentDataContainer();
+        return data.has(copyKey) || data.has(actionKey);
+    }
+
+    /** 删除玩家背包和鼠标上的菜单图标、显示副本。只扫描这名玩家的 41 格和鼠标。 */
+    void purge(Player player) {
+        int removed = 0;
+        var inventory = player.getInventory();
+        ItemStack[] contents = inventory.getContents();
+        for (int slot = 0; slot < contents.length; slot++) {
+            if (menuItem(contents[slot])) { inventory.setItem(slot, null); removed++; }
+        }
+        if (menuItem(player.getItemOnCursor())) { player.setItemOnCursor(null); removed++; }
+        if (removed > 0) plugin.getLogger().warning("Removed " + removed + " copied menu item(s) from " + player.getName()
+            + "; another plugin or a glitch moved them out of an ALFakePlayer menu.");
+    }
+
+    /** 关闭菜单后，服务器会把鼠标上的物品放回背包，所以下一刻再检查一次。 */
+    void purgeLater(Player player) {
+        purge(player);
+        player.getScheduler().execute(plugin, () -> purge(player), null, 1);
+    }
+
+    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
+    public void onDrop(org.bukkit.event.player.PlayerDropItemEvent event) {
+        if (!menuItem(event.getItemDrop().getItemStack())) return;
+        event.getItemDrop().remove();
+        plugin.getLogger().warning(event.getPlayer().getName() + " dropped a copied ALFakePlayer menu item; it was removed.");
     }
 
     private boolean placeholder(ItemStack stack) {
@@ -273,7 +330,8 @@ final class Menus implements Listener {
         return view != null && view.entry == entry;
     }
 
-    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
+    /** 不忽略已取消的点击：界面里的物品全部由这里处理，其他插件取消点击不应让 Shift 等操作失效。 */
+    @EventHandler(priority = EventPriority.HIGHEST)
     public void onClick(InventoryClickEvent event) {
         if (!(event.getView().getTopInventory().getHolder() instanceof View view)) return;
         int raw = event.getRawSlot();
@@ -281,20 +339,18 @@ final class Menus implements Listener {
             || !plugin.allowed(player, view.entry) || event instanceof InventoryCreativeEvent) { event.setCancelled(true); return; }
         boolean simple = event.getClick() == ClickType.LEFT || event.getClick() == ClickType.RIGHT;
         boolean quick = event.getClick() == ClickType.SHIFT_LEFT || event.getClick() == ClickType.SHIFT_RIGHT;
+        // 自己背包里的普通点击交给原版处理（被其他插件取消的保持取消）
         if (raw >= view.inventory.getSize() && simple) return;
         event.setCancelled(true);
+        if (raw >= view.inventory.getSize() && quick) { quickDeposit(event, player, view); return; }
         if (raw < 0 || raw >= view.inventory.getSize()) return;
         int remote = view.layout.slots[raw];
         if (remote >= 0) {
             if (!simple && !quick) return;
-            if (!plugin.editable(view.entry)) {
-                if (plugin.roster.holds(view.entry)) plugin.msg(player, "remote_inventory");
-                else plugin.msg(player, "remote_inventory_server", "server", plugin.serverLabel(plugin.roster.remoteHolder(view.entry)));
-                return;
-            }
+            if (!plugin.editable(view.entry)) { notEditable(player, view); return; }
+            // 以假人背包的实际内容为准：和玩家看到的不一致时只刷新界面，不做任何移动
             ItemStack current = DummyPlayers.copy(plugin.item(view.entry, remote));
-            ItemStack shown = placeholder(event.getCurrentItem()) ? null : DummyPlayers.copy(event.getCurrentItem());
-            if (!Objects.equals(current, shown)) { refreshItems(view); return; }
+            if (!Objects.equals(current, view.shown[raw])) { refreshItems(view); return; }
             if (quick) quickWithdraw(player, view, raw, remote, current);
             else transfer(event, player, view, raw, remote, current);
             return;
@@ -461,8 +517,14 @@ final class Menus implements Listener {
         attackInputs.remove(player);
     }
 
+    private void notEditable(Player player, View view) {
+        if (plugin.roster.holds(view.entry)) plugin.msg(player, "remote_inventory");
+        else plugin.msg(player, "remote_inventory_server", "server", plugin.serverLabel(plugin.roster.remoteHolder(view.entry)));
+    }
+
     private void transfer(InventoryClickEvent event, Player player, View view, int raw, int remote, ItemStack current) {
         ItemStack cursor = DummyPlayers.copy(event.getView().getCursor());
+        if (menuItem(cursor)) { event.getView().setCursor(null); purge(player); return; }
         boolean right = event.getClick() == ClickType.RIGHT;
         if (cursor != null && !accepts(remote, cursor)) { plugin.msg(player, "wrong_equipment"); return; }
         boolean equipment = remote >= 36 && remote < 40;
@@ -486,9 +548,64 @@ final class Menus implements Listener {
             next = cursor;
             hand = current;
         }
-        if (!plugin.replaceItem(view.entry, remote, current, next)) { refreshItems(view); return; }
+        // 先扣后给：放入时先改鼠标再放进假人背包，失败就还原鼠标；取出时先从假人背包扣除再给鼠标
+        if (cursor != null) event.getView().setCursor(hand);
+        if (!plugin.replaceItem(view.entry, remote, current, next)) {
+            if (cursor != null) event.getView().setCursor(cursor);
+            refreshItems(view);
+            return;
+        }
+        if (cursor == null) event.getView().setCursor(hand);
         display(view, raw, remote, DummyPlayers.copy(next));
-        event.getView().setCursor(hand);
+    }
+
+    /**
+     * Shift 点击自己背包里的物品：放进假人背包。盔甲优先穿到空着的对应装备栏；
+     * 其余先叠到同种物品上，再放主背包空格，主背包满了再放快捷栏（不放进手持的第 1 格）。
+     * 每一步先从玩家背包扣除，再放进假人背包，放入失败就退回，出错时最多少给，不会多出物品。
+     */
+    private void quickDeposit(InventoryClickEvent event, Player player, View view) {
+        if (!view.layout.inventory() || !(event.getClickedInventory() instanceof PlayerInventory)) return;
+        int source = event.getSlot();
+        ItemStack moving = DummyPlayers.copy(event.getCurrentItem());
+        if (moving == null) return;
+        if (menuItem(moving)) { purge(player); return; }
+        if (!plugin.editable(view.entry)) { notEditable(player, view); return; }
+        var inventory = player.getInventory();
+        List<Integer> targets = new ArrayList<>();
+        var equippable = moving.getData(DataComponentTypes.EQUIPPABLE);
+        if (equippable != null) {
+            int armor = switch (equippable.slot()) {
+                case FEET -> 36; case LEGS -> 37; case CHEST -> 38; case HEAD -> 39; default -> -1;
+            };
+            if (armor >= 0) targets.add(armor);
+        }
+        for (int slot = 9; slot < 36; slot++) targets.add(slot);
+        for (int slot = 0; slot < 9; slot++) targets.add(slot);
+        boolean changed = false;
+        for (int pass = 0; pass < 2; pass++) {
+            for (int target : targets) {
+                ItemStack held = DummyPlayers.copy(inventory.getItem(source));
+                if (held == null || !held.isSimilar(moving)) { pass = 2; break; }
+                ItemStack current = DummyPlayers.copy(plugin.item(view.entry, target));
+                boolean armor = target >= 36;
+                // 第一轮只叠加到同种物品上；第二轮放空格子（装备栏只在第二轮、且物品能穿在这里时使用）
+                if (pass == 0 ? current == null || armor || !current.isSimilar(held) : current != null || target == 0) continue;
+                if (armor && !accepts(target, held)) continue;
+                int limit = armor ? 1 : held.getMaxStackSize();
+                int amount = Math.min(held.getAmount(), limit - (current == null ? 0 : current.getAmount()));
+                if (amount <= 0) continue;
+                ItemStack next = current == null ? held.asQuantity(amount) : current.asQuantity(current.getAmount() + amount);
+                inventory.setItem(source, held.getAmount() == amount ? null : held.asQuantity(held.getAmount() - amount));
+                if (!plugin.replaceItem(view.entry, target, current, next)) {
+                    inventory.setItem(source, held);
+                    pass = 2;
+                    break;
+                }
+                changed = true;
+            }
+        }
+        if (changed) refreshItems(view);
     }
 
     private void quickWithdraw(Player player, View view, int raw, int remote, ItemStack current) {
@@ -549,6 +666,7 @@ final class Menus implements Listener {
         if (!(event.getInventory().getHolder() instanceof View view)) return;
         viewers.remove(view.viewer, view);
         maybeRelease(view.entry);
+        if (event.getPlayer() instanceof Player player) purgeLater(player);
     }
 
     void close(Roster.Entry entry) {

@@ -56,21 +56,35 @@ final class RosterMenus implements Listener {
     }
 
     private final DummyPlayers plugin;
-    private final Map<String, Layout> layouts;
     private final NamespacedKey actionKey, objectKey;
-    private final String summoned, summonedRemote, notSummoned;
+    private volatile Map<String, Layout> layouts;
+    private volatile String summoned, summonedRemote, notSummoned;
 
     RosterMenus(DummyPlayers plugin, YamlConfiguration yaml) {
         this.plugin = plugin;
-        layouts = readLayouts(yaml);
         actionKey = new NamespacedKey(plugin, "gui_action");
         objectKey = new NamespacedKey(plugin, "object_id");
+        reload(yaml);
+    }
+
+    static void validate(YamlConfiguration yaml) { readLayouts(yaml); }
+
+    /** 换用新的菜单配置（已校验）。已打开的菜单仍使用打开时的布局。 */
+    void reload(YamlConfiguration yaml) {
+        layouts = readLayouts(yaml);
         summoned = yaml.getString("states.summoned", "&a已召唤");
         summonedRemote = yaml.getString("states.summoned_remote", "&b在 %server% 运行");
         notSummoned = yaml.getString("states.not_summoned", "&7未召唤");
     }
 
-    static void validate(YamlConfiguration yaml) { readLayouts(yaml); }
+    /** 关闭所有玩家打开的主菜单、档位选择、确认和购买物品菜单。 */
+    void closeAll() {
+        for (Player player : Bukkit.getOnlinePlayers()) {
+            player.getScheduler().execute(plugin, () -> {
+                if (player.getOpenInventory().getTopInventory().getHolder(false) instanceof Panel) player.closeInventory();
+            }, null, 1);
+        }
+    }
 
     private static Map<String, Layout> readLayouts(YamlConfiguration yaml) {
         Map<String, Layout> layouts = new HashMap<>();
@@ -269,6 +283,13 @@ final class RosterMenus implements Listener {
         return component.decoration(TextDecoration.ITALIC, false);
     }
 
+    /** 菜单图标不应出现在玩家身上，关闭菜单后检查一次（被其他插件或漏洞带出来时删除）。 */
+    @EventHandler public void onClose(org.bukkit.event.inventory.InventoryCloseEvent event) {
+        if (event.getInventory().getHolder(false) instanceof Panel && event.getPlayer() instanceof Player player) {
+            plugin.menus.purgeLater(player);
+        }
+    }
+
     @EventHandler(priority = EventPriority.HIGHEST)
     public void onDrag(InventoryDragEvent event) {
         if (event.getView().getTopInventory().getHolder() instanceof Panel panel
@@ -321,6 +342,11 @@ final class RosterMenus implements Listener {
             if (entry == null || !plugin.allowed(player, entry)) { openLater(player, () -> openMain(player, panel.page)); return; }
             if (event.getClick() == ClickType.SHIFT_RIGHT) {
                 openLater(player, () -> plugin.menus.open(player, entry, "inventory"));
+            } else if (event.getClick() == ClickType.SHIFT_LEFT) {
+                // 收回后刷新菜单，显示新的状态；玩家已经关闭或切换了菜单时不再打开
+                openLater(player, () -> plugin.despawnFromMenu(player, entry, () -> {
+                    if (player.getOpenInventory().getTopInventory() == panel.inventory) openMain(player, panel.page);
+                }));
             } else if (event.getClick() == ClickType.RIGHT) {
                 plugin.requestTeleportFromMenu(player, entry.key.slot(), false);
             } else if (event.getClick() == ClickType.LEFT) {

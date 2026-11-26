@@ -121,6 +121,24 @@ final class NativeDummy extends ServerPlayer {
 
     private static int pickupSlot(int index) { return index < HOTBAR_SIZE ? index : Inventory.SLOT_OFFHAND; }
 
+    /**
+     * 捡起这组物品后能否全部留在主背包：主背包的空格子，加上背包、快捷栏和副手里同种物品还能叠加的数量。
+     * 开启搬运时据此决定是否捡起，避免主背包满后物品塞进快捷栏（快捷栏不卸货，会一直占着）。
+     */
+    boolean canStore(ItemStack stack) {
+        Inventory inventory = getInventory();
+        int limit = Math.min(stack.getMaxStackSize(), inventory.getMaxStackSize());
+        int room = 0;
+        for (int slot = 0; slot < BAG_END && room < stack.getCount(); slot++) {
+            ItemStack target = inventory.getItem(slot);
+            if (target.isEmpty()) { if (slot >= HOTBAR_SIZE) room += limit; }
+            else if (ItemStack.isSameItemSameComponents(target, stack)) room += Math.max(0, limit - target.getCount());
+        }
+        ItemStack offhand = inventory.getItem(Inventory.SLOT_OFFHAND);
+        if (!offhand.isEmpty() && ItemStack.isSameItemSameComponents(offhand, stack)) room += Math.max(0, limit - offhand.getCount());
+        return room >= stack.getCount();
+    }
+
     static int moveToBag(Inventory inventory, ItemStack stack, int amount) {
         int left = amount;
         int limit = Math.min(stack.getMaxStackSize(), inventory.getMaxStackSize());

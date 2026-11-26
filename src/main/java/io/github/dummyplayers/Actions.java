@@ -74,8 +74,9 @@ final class Actions {
         if (dummy.isShiftKeyDown() != entry.sneaking) dummy.setShiftKeyDown(entry.sneaking);
         int revision = entry.workRevision.get();
         if (workRevision != revision) { workRevision = revision; wake(); }
-        if (plugin.unloadChests && entry.autoUnload && tick >= nextUnload) {
-            if (ChestUnloader.run(dummy)) unloadRetry = Math.min(plugin.unloadMaxInterval,
+        // 有玩家正在打开这个假人的背包时不卸货，免得物品在玩家眼前消失、和玩家的操作冲突
+        if (plugin.unloadChests && entry.autoUnload && tick >= nextUnload && !plugin.menus.editing(entry)) {
+            if (ChestUnloader.run(dummy, plugin.keepFood, plugin.foodBlacklist)) unloadRetry = Math.min(plugin.unloadMaxInterval,
                 Math.max(plugin.unloadInterval, unloadRetry * 2));
             else unloadRetry = 0;
             nextUnload = tick + Math.max(plugin.unloadInterval, unloadRetry);

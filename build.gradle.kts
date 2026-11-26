@@ -3,8 +3,11 @@ plugins {
     id("com.gradleup.shadow") version "9.6.1"
 }
 group = "io.github.dummyplayers"
-version = "1.0.0"
-repositories { mavenCentral() }
+version = "1.0.1"
+repositories {
+    mavenCentral()
+    maven("https://repo.extendedclip.com/releases/")
+}
 val paperHome = providers.gradleProperty("paperHome").orElse(providers.environmentVariable("PAPER_HOME"))
 dependencies {
     val home = paperHome.orNull ?: error("Set -PpaperHome=<Paper 26.1.2 directory after first launch>")
@@ -15,6 +18,7 @@ dependencies {
     })
     compileOnly(fileTree("$home/libraries/io/papermc/paper/paper-api") { include("26.1.2*/**/*.jar") })
     compileOnly("net.luckperms:api:5.4")
+    compileOnly("me.clip:placeholderapi:2.12.3")
     // MySQL 连接池。MySQL 与 SQLite 驱动由 Paper 自带，slf4j 由 Paper 提供
     implementation("com.zaxxer:HikariCP:6.3.0") { exclude(group = "org.slf4j") }
 }

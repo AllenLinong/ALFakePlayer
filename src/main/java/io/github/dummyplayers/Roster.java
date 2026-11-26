@@ -75,7 +75,8 @@ final class Roster {
         static final ClaimResult ACQUIRED = new ClaimResult(Claim.ACQUIRED, null);
         static final ClaimResult MISSING = new ClaimResult(Claim.MISSING, null);
     }
-    record ServerInfo(String id, String name, int live, long silentMillis) { }
+    /** live：已召唤的假人数；players：真实玩家数。 */
+    record ServerInfo(String id, String name, int live, int players, long silentMillis) { }
 
     private record Row(UUID id, Key key, String alias, DummyTier tier, WorkTool tool, boolean mine, boolean attack,
                        boolean use, boolean autoUnload, boolean pushable, boolean sneaking, int attackInterval,
@@ -287,6 +288,13 @@ final class Roster {
 
     /** 假人在其他子服运行时返回该子服 ID。 */
     String remoteHolder(Entry entry) { return leases.containsKey(entry.id) ? null : remoteLive.get(entry.id); }
+
+    /** 正在其他子服运行的假人（假人 → 子服 ID）的快照。 */
+    Map<UUID, String> remoteSessions() {
+        Map<UUID, String> copy = new HashMap<>(remoteLive);
+        copy.keySet().removeIf(leases::containsKey);
+        return copy;
+    }
 
     /** 收到其他子服的租约变更通知：live 为 false 表示该子服已收回或降为编辑。 */
     void remoteSession(UUID dummy, String server, boolean live) {
@@ -793,8 +801,8 @@ final class Roster {
 
     // ── 心跳 ──────────────────────────────────────────────
 
-    /** 刷新本服和本服租约的心跳，同时读取其他子服的状态。 */
-    void heartbeat(int liveCount) {
+    /** 刷新本服和本服租约的心跳（同时上报假人数和真实玩家数），并读取其他子服的状态。 */
+    void heartbeat(int liveCount, int playerCount) {
         synchronized (this) { if (closing) return; }
         submit(() -> {
             Set<UUID> held = new HashSet<>(leases.keySet());
@@ -802,8 +810,8 @@ final class Roster {
             List<ServerInfo> list = new ArrayList<>();
             Set<UUID> confirmed = new HashSet<>();
             db.withConnection(connection -> {
-                if (Database.update(connection, "UPDATE " + t("servers") + " SET name = ?, live_count = ?, heartbeat = "
-                        + db.now() + " WHERE server_id = ? AND instance = ?", serverName, liveCount, serverId, instance) == 0) {
+                if (Database.update(connection, "UPDATE " + t("servers") + " SET name = ?, live_count = ?, player_count = ?, heartbeat = "
+                        + db.now() + " WHERE server_id = ? AND instance = ?", serverName, liveCount, playerCount, serverId, instance) == 0) {
                     boolean taken;
                     try (PreparedStatement statement = connection.prepareStatement(
                             "SELECT instance FROM " + t("servers") + " WHERE server_id = ?")) {
@@ -816,8 +824,8 @@ final class Roster {
                             + "'. Each server needs a unique server_id in config.yml, or fake players may be duplicated.");
                     }
                     if (!taken) Database.update(connection, "INSERT INTO " + t("servers")
-                        + " (server_id, name, instance, live_count, heartbeat) VALUES (?, ?, ?, ?, " + db.now() + ")",
-                        serverId, serverName, instance, liveCount);
+                        + " (server_id, name, instance, live_count, player_count, heartbeat) VALUES (?, ?, ?, ?, ?, " + db.now() + ")",
+                        serverId, serverName, instance, liveCount, playerCount);
                 }
                 Database.update(connection, "UPDATE " + t("sessions") + " SET heartbeat = " + db.now()
                     + " WHERE server_id = ?", serverId);
@@ -836,11 +844,11 @@ final class Roster {
                         while (rows.next()) remote.put(UUID.fromString(rows.getString(1)), rows.getString(2));
                     }
                 }
-                try (PreparedStatement statement = connection.prepareStatement("SELECT server_id, name, live_count, "
+                try (PreparedStatement statement = connection.prepareStatement("SELECT server_id, name, live_count, player_count, "
                         + db.now() + " - heartbeat FROM " + t("servers") + " ORDER BY server_id")) {
                     try (ResultSet rows = statement.executeQuery()) {
                         while (rows.next()) list.add(new ServerInfo(rows.getString(1), rows.getString(2), rows.getInt(3),
-                            Math.max(0, rows.getLong(4))));
+                            rows.getInt(4), Math.max(0, rows.getLong(5))));
                     }
                 }
                 Database.update(connection, "DELETE FROM " + t("servers") + " WHERE heartbeat < " + db.now() + " - ?",

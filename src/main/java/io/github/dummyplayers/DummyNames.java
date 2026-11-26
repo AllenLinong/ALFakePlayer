@@ -34,7 +34,8 @@ final class DummyNames {
         placeholders = method;
     }
 
-    void tab(NativeDummy dummy, Component label, HiddenTag display) {
+    /** 更新假人在 TAB 中的显示名（名字后加上 PlaceholderAPI 称号），返回最终显示的内容。 */
+    Component tab(NativeDummy dummy, Component label, HiddenTag display) {
         Player player = dummy.getBukkitEntity();
         Component rendered = label;
         if (placeholders != null && player.isValid()) {
@@ -45,6 +46,7 @@ final class DummyNames {
             } catch (ReflectiveOperationException | LinkageError ignored) { }
         }
         display.update(dummy, PaperAdventure.asVanilla(rendered));
+        return rendered;
     }
 
     static final class HiddenTag {
