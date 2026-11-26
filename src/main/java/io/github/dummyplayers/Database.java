@@ -253,6 +253,16 @@ final class Database implements AutoCloseable {
                 + "dummy_id VARCHAR(36) NOT NULL PRIMARY KEY, server_id VARCHAR(64) NOT NULL,"
                 + " live TINYINT NOT NULL DEFAULT 0, heartbeat BIGINT NOT NULL,"
                 + " FOREIGN KEY (dummy_id) REFERENCES " + table("dummies") + " (id) ON DELETE CASCADE)" + engine);
+            // 1.0.3 新增：正常关服时本服正在运行的假人和位置，开服后在原位置召唤回来
+            execute(connection, "CREATE TABLE IF NOT EXISTS " + table("restores") + " ("
+                + "dummy_id VARCHAR(36) NOT NULL PRIMARY KEY, server_id VARCHAR(64) NOT NULL, world VARCHAR(128) NOT NULL,"
+                + " x DOUBLE NOT NULL, y DOUBLE NOT NULL, z DOUBLE NOT NULL, yaw DOUBLE NOT NULL, pitch DOUBLE NOT NULL,"
+                + " health DOUBLE NOT NULL, food INT NOT NULL, saturation DOUBLE NOT NULL, exhaustion DOUBLE NOT NULL,"
+                + " FOREIGN KEY (dummy_id) REFERENCES " + table("dummies") + " (id) ON DELETE CASCADE)" + engine);
+            // 1.0.3 新增：/afp test 测试假人的固定档案，名字不区分大小写
+            execute(connection, "CREATE TABLE IF NOT EXISTS " + table("test_profiles") + " ("
+                + "name_key VARCHAR(16) NOT NULL PRIMARY KEY, name VARCHAR(16) NOT NULL, id VARCHAR(36) NOT NULL,"
+                + " grp VARCHAR(64) NOT NULL, created BIGINT NOT NULL)" + engine);
             execute(connection, "CREATE TABLE IF NOT EXISTS " + table("servers") + " ("
                 + "server_id VARCHAR(64) NOT NULL PRIMARY KEY, name VARCHAR(128) NOT NULL, instance VARCHAR(36) NOT NULL,"
                 + " live_count INT NOT NULL DEFAULT 0, player_count INT NOT NULL DEFAULT 0, heartbeat BIGINT NOT NULL)" + engine);

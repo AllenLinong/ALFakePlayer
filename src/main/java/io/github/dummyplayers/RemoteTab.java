@@ -59,6 +59,15 @@ final class RemoteTab {
         tests.put(server, Map.copyOf(shown));
     }
 
+    /** 在线子服正在显示的测试条目名字（小写）。 */
+    java.util.Set<String> testNames() {
+        var names = new java.util.HashSet<String>();
+        for (var server : tests.entrySet()) {
+            if (online(server.getKey())) server.getValue().values().forEach(shown -> names.add(shown.name().toLowerCase(java.util.Locale.ROOT)));
+        }
+        return names;
+    }
+
     /** 在线子服的测试条目数，计入在线人数变量。 */
     int remoteTests() {
         int count = 0;

@@ -75,6 +75,12 @@ final class Roster {
         static final ClaimResult ACQUIRED = new ClaimResult(Claim.ACQUIRED, null);
         static final ClaimResult MISSING = new ClaimResult(Claim.MISSING, null);
     }
+    /** /afp test 测试假人的固定档案：名字、UUID 和权限组，第一次用到时生成，之后不变。 */
+    record TestProfile(String name, UUID id, String group) { }
+
+    /** 正常关服时在本服运行的假人：开服后在这个位置召唤回来，并恢复生命和饱食度。 */
+    record RestorePoint(UUID dummy, String world, double x, double y, double z, float yaw, float pitch,
+                        double health, int food, float saturation, float exhaustion) { }
     /** live：已召唤的假人数；players：真实玩家数。 */
     record ServerInfo(String id, String name, int live, int players, long silentMillis) { }
 
@@ -896,6 +902,98 @@ final class Roster {
     }
 
     /** 停服时调用：写入全部变更，删除本服的租约和心跳记录。 */
+    /**
+     * 关服时记下本服正在运行的假人，替换本服之前的记录。同一个假人只保留最新的一条（它之后可能在别的子服运行过）。
+     * 在 close() 之前调用：存储线程按顺序执行，关闭前一定写完。
+     */
+    void saveRestores(List<RestorePoint> points) {
+        try {
+            worker.execute(() -> {
+                try {
+                    db.transaction(connection -> {
+                        Database.update(connection, "DELETE FROM " + t("restores") + " WHERE server_id = ?", serverId);
+                        for (RestorePoint point : points) {
+                            Database.update(connection, "DELETE FROM " + t("restores") + " WHERE dummy_id = ?", point.dummy().toString());
+                            Database.update(connection, "INSERT INTO " + t("restores")
+                                + " (dummy_id, server_id, world, x, y, z, yaw, pitch, health, food, saturation, exhaustion)"
+                                + " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                                point.dummy().toString(), serverId, point.world(), point.x(), point.y(), point.z(),
+                                (double) point.yaw(), (double) point.pitch(), point.health(), point.food(),
+                                (double) point.saturation(), (double) point.exhaustion());
+                        }
+                        return null;
+                    });
+                } catch (SQLException error) {
+                    plugin.getLogger().log(Level.WARNING, "Could not save the fake players to re-summon after restart", error);
+                }
+            });
+        } catch (RejectedExecutionException ignored) { }
+    }
+
+    /** 开服时取出并删除上次关服时本服记下的假人。 */
+    CompletableFuture<List<RestorePoint>> takeRestores() {
+        return submit(() -> db.transaction(connection -> {
+            List<RestorePoint> points = new ArrayList<>();
+            try (PreparedStatement select = connection.prepareStatement("SELECT dummy_id, world, x, y, z, yaw, pitch,"
+                    + " health, food, saturation, exhaustion FROM " + t("restores") + " WHERE server_id = ?")) {
+                select.setString(1, serverId);
+                try (ResultSet rows = select.executeQuery()) {
+                    while (rows.next()) {
+                        try {
+                            points.add(new RestorePoint(UUID.fromString(rows.getString(1)), rows.getString(2),
+                                rows.getDouble(3), rows.getDouble(4), rows.getDouble(5), (float) rows.getDouble(6),
+                                (float) rows.getDouble(7), rows.getDouble(8), rows.getInt(9), (float) rows.getDouble(10),
+                                (float) rows.getDouble(11)));
+                        } catch (IllegalArgumentException bad) {
+                            plugin.getLogger().warning("Ignoring an invalid re-summon record: " + bad.getMessage());
+                        }
+                    }
+                }
+            }
+            Database.update(connection, "DELETE FROM " + t("restores") + " WHERE server_id = ?", serverId);
+            return points;
+        }));
+    }
+
+    /**
+     * 给还没有档案的名字写入档案（已有的保持不变，其他子服先写入的为准），返回全部档案：小写名字 → 档案。
+     */
+    CompletableFuture<Map<String, TestProfile>> ensureTestProfiles(List<TestProfile> candidates) {
+        return submit(() -> db.transaction(connection -> {
+            Map<String, TestProfile> stored = readTestProfiles(connection);
+            boolean inserted = false;
+            for (TestProfile candidate : candidates) {
+                String key = candidate.name().toLowerCase(Locale.ROOT);
+                if (stored.containsKey(key)) continue;
+                Database.update(connection, db.insertIgnore() + t("test_profiles") + " (name_key, name, id, grp, created)"
+                    + " VALUES (?, ?, ?, ?, " + db.now() + ")", key, candidate.name(), candidate.id().toString(), candidate.group());
+                inserted = true;
+            }
+            return inserted ? readTestProfiles(connection) : stored;
+        }));
+    }
+
+    private Map<String, TestProfile> readTestProfiles(Connection connection) throws SQLException {
+        Map<String, TestProfile> result = new HashMap<>();
+        try (PreparedStatement select = connection.prepareStatement("SELECT name_key, name, id, grp FROM " + t("test_profiles"));
+             ResultSet rows = select.executeQuery()) {
+            while (rows.next()) {
+                try { result.put(rows.getString(1), new TestProfile(rows.getString(2), UUID.fromString(rows.getString(3)), rows.getString(4))); }
+                catch (IllegalArgumentException bad) { plugin.getLogger().warning("Ignoring an invalid test profile: " + rows.getString(1)); }
+            }
+        }
+        return result;
+    }
+
+    /** 修改测试假人档案的权限组。 */
+    CompletableFuture<Void> setTestGroup(String name, String group) {
+        return submit(() -> {
+            db.withConnection(connection -> Database.update(connection, "UPDATE " + t("test_profiles")
+                + " SET grp = ? WHERE name_key = ?", group, name.toLowerCase(Locale.ROOT)));
+            return null;
+        });
+    }
+
     void close() {
         synchronized (this) {
             if (closing) return;

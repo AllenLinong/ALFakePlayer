@@ -13,12 +13,18 @@ interface Groups {
     String prefix(Roster.Entry entry);
     /** 权限组自身的前缀，用于 /afp test 的测试条目；组不存在或没有前缀时为空字符串。 */
     String groupPrefix(String group);
+    /**
+     * TAB 测试假人通过服务器聊天流程说话时，聊天插件按 LuckPerms 读取它的前缀：确保这个 UUID 有 LuckPerms 用户、
+     * 只继承 group 这一个组，并加载在内存里。
+     */
+    CompletableFuture<Void> prepareUser(java.util.UUID id, String name, String group);
 
     Groups NONE = new Groups() {
         public CompletableFuture<Void> prepare(Roster.Entry entry, String group) { return CompletableFuture.completedFuture(null); }
         public CompletableFuture<Boolean> exists(String group) { return CompletableFuture.completedFuture(true); }
         public String prefix(Roster.Entry entry) { return ""; }
         public String groupPrefix(String group) { return ""; }
+        public CompletableFuture<Void> prepareUser(java.util.UUID id, String name, String group) { return CompletableFuture.completedFuture(null); }
     };
 
     final class Luck implements Groups {
@@ -53,6 +59,20 @@ interface Groups {
                     user.setPrimaryGroup(group);
                     return api.getUserManager().saveUser(user);
                 });
+            });
+        }
+
+        public CompletableFuture<Void> prepareUser(java.util.UUID id, String name, String configured) {
+            String group = normalize(configured);
+            return api.getUserManager().loadUser(id, name).thenCompose(user -> {
+                var parents = user.getNodes(NodeType.INHERITANCE);
+                boolean correct = parents.size() == 1 && parents.stream().allMatch(node -> node.getGroupName().equals(group)
+                    && node.getValue() && !node.hasExpiry() && node.getContexts().isEmpty());
+                if (correct && user.getPrimaryGroup().equals(group)) return CompletableFuture.completedFuture(null);
+                user.data().clear(NodeType.INHERITANCE::matches);
+                user.data().add(InheritanceNode.builder(group).build());
+                user.setPrimaryGroup(group);
+                return api.getUserManager().saveUser(user);
             });
         }
 

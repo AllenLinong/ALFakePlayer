@@ -1,0 +1,241 @@
+# 配置版本号，由插件自动管理，请勿修改。插件更新后会据此自动升级本文件，自定义内容保留
+config_version: 1
+
+# ============================================================
+# TAB 测试假人（/afp test）
+# ============================================================
+# /afp test <数量> 让下面这些名字陆续出现在 TAB 列表里，计入在线人数变量和服务器列表人数
+# 每个名字第一次用到时生成固定档案（UUID、权限组），保存在数据库里，之后一直不变；跨服时所有子服共用
+# 同一个名字每次的 UUID 不变，所以原版默认皮肤也不变
+# 修改后执行 /afp reload 生效
+# ============================================================
+
+# 名字表：3–16 位字母、数字或下划线，不区分大小写，不能重复；不合规或重复的会被跳过，并在后台提示
+# 不会选中的名字：在线真人、真实假人、其他子服正在显示的测试假人，以及来过本服的玩家用过的名字
+names:
+  - LazySky
+  - xiCookie
+  - yuesu_
+  - Bear_yan
+  - xuantong_
+  - yele404
+  - AhMu
+  - mingzi16
+  - MinerSunny07
+  - _Bear777
+  - hanzi88
+  - CoolPanda
+  - AhYu
+  - tanghao2008
+  - rantang5
+  - ShanQi
+  - Otter_han
+  - Miner_tong
+  - SleepyLatte
+  - _Fox16
+  - yemi233
+  - SoftPirate666
+  - AhShan
+  - Duo_Lu
+  - WolfPixel66
+  - FluffyKoi
+  - luzi11
+  - BaiChu_2010
+  - zhichu_
+  - SpicyKnight
+  - yuanming9
+  - Leaf_zi
+  - Lan_Jie
+  - WildPirate
+  - Lemon_lu
+  - HanShan_2
+  - HeRan
+  - SuRui_1314
+  - hanfan2008
+  - ItsYue666
+  - yizi11
+  - ArcherPanda233
+  - Sky_qi
+  - SunnyFox9
+  - XinChu_2010
+  - Echo_yang
+  - SleepyNova2333
+  - Nan_Mo
+  - YuanJiang_03
+  - an_yu_9
+  - ItsYuan11
+  - Tong_Lin
+  - MintBear777
+  - junCloud
+  - KaiYao_666
+  - MadSnow
+  - iamXiaoXiao
+  - qiuyu_
+  - LittleEmber
+  - KeheQwQ
+  - JiangYan
+  - MochiPeach16
+  - anke07
+  - TinyPudding404
+  - _Lemon99
+  - MrDuck
+  - Knight_xing
+  - SongBai
+  - jiangrui123
+  - FastStar
+  - BunnyMiner07
+  - jiangPeach
+  - Tang_Tang
+  - LittleKoi
+  - xiye12
+  - _Frost0
+  - JunFan_2010
+  - leWolf
+  - LuckySunny
+  - qiCherry
+  - SaltyBreeze
+  - fengjiang666
+  - JieCheng
+  - SaltySunny99
+  - SongQiu_5
+  - GoldenLucky666
+  - duo_he_9
+  - tianKnight
+  - MibinQwQ
+  - KoiBerry1
+  - yanMango
+  - _Sky66
+  - ItsJun233
+  - shanyang99
+  - yaolu_
+  - SuperBear
+  - shanbai520
+  - FluffyRain
+  - Lu_Xuan
+  - An_Yan
+  - yangzi0
+  - Ning_Han
+  - Tofu_yuan
+  - QingBai_0
+  - GreenNova16
+  - RanFeng
+  - YuHao
+  - RuimingQwQ
+  - jiangLemon
+  - LittleMochi
+  - SkyMochi0721
+  - RuiLu_5
+  - GoldenKiwi9
+  - SweetLemon03
+  - tongzhou_
+  - lutian_
+  - MrNova
+  - MiTang
+  - SpicyMango
+  - Cloud_yan
+  - mosu0
+  - iamChenMi
+  - SoftNova520
+  - muxuan1314
+  - _Duck66
+  - zhouPixel
+  - A_Lan
+  - xifan_
+  - GreenEcho
+  - RuiQiu
+  - GreenBunny
+  - xing_chen_88
+  - _Sunny11
+  - MengTian
+  - He_Tian
+  - SleepyBerry
+  - Zhou_Xiao
+  - QiLu_66
+  - YuanRui_2
+  - ChengYang_2008
+  - qishan_
+  - MadLatte1
+  - kaixiao_
+  - ChillOtter
+  - Ran_Qing
+  - KoiCookie2008
+  - BinJie_66
+  - SongjunQwQ
+  - YaoRui_99
+  - mushan8
+  - DarkMochi
+  - MadSky03
+  - SweetBear
+  - XuanRan_404
+  - hanzi5
+  - Ghost_chen
+  - YangYue
+  - dongMint
+  - AnQi_777
+  - CoolRiver
+  - moMaple
+  - WildFrost88
+  - iamMiXing
+  - Latte_ming
+  - Tian_Nan
+  - A_Ye
+  - LeMeng_0
+  - Bai_Wei
+  - DuckWolf11
+  - _River233
+  - yueye1
+  - Fox_jie
+  - Mo_Tong
+  - ItsLu520
+  - chuArcher
+  - CoolPeach66
+  - SoftCookie777
+  - _Cookie99
+  - HappyNova1314
+  - LuckyNova99
+  - iamYuanJun
+  - ItsDuo99
+  - JiangZhi
+  - ItsYuan16
+  - Yan_Dong
+  - YueZi_233
+  - Lu_Kai
+  - XingWei
+  - QiuXi_11
+  - _Miner07
+  - liRiver
+  - CatLucky123
+  - yuxing520
+  - LinJiang_2333
+  - mizi9
+  - Latte_yi
+  - MadMaple
+  - FluffySunny
+  - A_Tong
+  - MadOtter
+
+# 权限组和比例：测试假人第一次出现时按比例抽一个组，之后固定不变；TAB 里显示这个组的前缀
+# 组从这里删掉，或在 LuckPerms 里不存在了，用这个组的测试假人会按比例重新抽一个组
+# 这里的组都不存在时，使用 config.yml 中 luckperms.group 的组
+# 例如：
+#   default: 70
+#   vip: 20
+#   svip: 10
+groups:
+  default: 100
+
+# ── 进服和退服 ────────────────────────────────────────────
+join:
+  # /afp test 后陆续进入（或减少人数时陆续离开）的总时长，单位秒，在最短和最长之间随机；都填 0 则立即全部出现
+  ramp_up_seconds: [60, 180]
+  # 每隔多少分钟（在最短和最长之间随机）有一部分人下线、另一部分人上线，人数会小幅浮动
+  churn_minutes: [5, 15]
+  # 每次轮换的人数占当前人数的百分比（0–50），0 为不轮换
+  churn_percent: 10
+  # 是否在聊天里显示进服、退服提示，和真人进服、退服一样
+  messages: true
+  # 提示格式；留空使用原版的黄字“xxx 加入了游戏 / xxx 退出了游戏”（按玩家客户端的语言显示）
+  # 服务器用了自定义进服提示时，改成和它一样的格式；可用 %name% 名字、%prefix% 权限组前缀
+  # 例如 "&8[&a+&8] &7%name%" 和 "&8[&c-&8] &7%name%"
+  join_format: ""
+  quit_format: ""

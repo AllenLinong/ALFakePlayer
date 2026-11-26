@@ -21,7 +21,7 @@ final class DummyTeleport {
     private final ConcurrentHashMap<UUID, Long> cooldowns = new ConcurrentHashMap<>();
     /** 从其他子服跨服传送过来、等待到达的玩家：玩家 → 目标假人。 */
     private final Map<UUID, Arrival> arrivals = new ConcurrentHashMap<>();
-    private record Arrival(UUID dummy, long expires) { }
+    private record Arrival(UUID dummy, boolean admin, long expires) { }
     private int delaySeconds, cooldownSeconds;
 
     DummyTeleport(DummyPlayers plugin) { this.plugin = plugin; }
@@ -59,51 +59,65 @@ final class DummyTeleport {
         }
         String server = remote;
         if (!limited || delaySeconds == 0) {
-            if (server != null) travel(player, entry, server, limited);
-            else execute(player, active, bring, limited);
+            if (server != null) travel(player, entry, server, limited, false);
+            else execute(player, active, bring, limited, false);
             return;
         }
         plugin.msg(player, "teleport_wait", "seconds", delaySeconds);
         Bukkit.getAsyncScheduler().runDelayed(plugin, task -> {
             if (!player.getScheduler().execute(plugin, () -> {
-                if (player.isDead()) finish(player, owner, slot, "teleport_failed");
-                else if (server != null) travel(player, entry, server, true);
-                else execute(player, active, false, true);
+                if (player.isDead()) finish(player, entry, false, "teleport_failed");
+                else if (server != null) travel(player, entry, server, true, false);
+                else execute(player, active, false, true, false);
             }, () -> pending.remove(owner), 1)) pending.remove(owner);
         }, delaySeconds, TimeUnit.SECONDS);
     }
 
+    /** 管理员传送到任意玩家的假人：没有等待和冷却；假人在其他子服运行时把管理员送过去。在管理员线程调用。 */
+    void adminRequest(Player admin, Roster.Entry entry) {
+        DummyPlayers.Live active = plugin.live.get(entry.id);
+        String remote = null;
+        if (active == null || !online(active)) {
+            remote = plugin.network.enabled() ? plugin.roster.remoteHolder(entry) : null;
+            if (remote == null) { plugin.msg(admin, "admin_teleport_offline", "name", entry.name()); return; }
+        }
+        if (!pending.add(admin.getUniqueId())) { plugin.msg(admin, "teleport_pending"); return; }
+        if (remote != null) travel(admin, entry, remote, false, true);
+        else execute(admin, active, false, false, true);
+    }
+
     /** 跨服传送：通知目标子服等待玩家，再通过代理把玩家送过去。在玩家线程调用。 */
-    private void travel(Player player, Roster.Entry entry, String server, boolean limited) {
+    private void travel(Player player, Roster.Entry entry, String server, boolean limited, boolean admin) {
         UUID owner = player.getUniqueId();
-        int slot = entry.key.slot();
-        if (!plugin.allowed(player, entry) || !player.hasPermission(DummyPlayers.TELEPORT)) {
-            finish(player, owner, slot, "no_permission");
+        if (!permitted(player, entry, admin)) {
+            finish(player, entry, admin, "no_permission");
             return;
         }
         if (!server.equals(plugin.roster.remoteHolder(entry))) {
-            finish(player, owner, slot, "teleport_offline");
+            finish(player, entry, admin, "teleport_offline");
             return;
         }
         var body = new JsonObject();
         body.addProperty("player", owner.toString());
         body.addProperty("dummy", entry.id.toString());
+        if (admin) body.addProperty("admin", true);
         plugin.network.send(server, "arrival", body);
         try { plugin.network.connect(player, server); }
         catch (RuntimeException error) {
             plugin.getLogger().log(Level.WARNING, "Could not send " + player.getName() + " to server " + server, error);
-            finish(player, owner, slot, "teleport_failed");
+            finish(player, entry, admin, "teleport_failed");
             return;
         }
         if (limited) startCooldown(owner);
         pending.remove(owner);
-        plugin.msg(player, "teleport_connect", "server", plugin.serverLabel(server), "slot", slot);
+        plugin.msg(player, key("teleport_connect", admin), "server", plugin.serverLabel(server),
+            "slot", entry.key.slot(), "name", entry.name());
     }
 
     /** 其他子服通知：该玩家将跨服传送到本服的假人。 */
-    void expect(UUID player, UUID dummy) {
+    void expect(UUID player, UUID dummy, boolean admin) {
         arrivals.values().removeIf(arrival -> arrival.expires < System.currentTimeMillis());
-        arrivals.put(player, new Arrival(dummy, System.currentTimeMillis() + 30_000));
+        arrivals.put(player, new Arrival(dummy, admin, System.currentTimeMillis() + 30_000));
         Player online = Bukkit.getPlayer(player);
         if (online != null) arrived(online);
     }
@@ -116,39 +130,40 @@ final class DummyTeleport {
             UUID owner = player.getUniqueId();
             Roster.Entry entry = plugin.roster.byId.get(arrival.dummy);
             DummyPlayers.Live active = entry == null ? null : plugin.live.get(entry.id);
-            if (active == null || !online(active) || !plugin.allowed(player, entry)) {
-                plugin.msg(player, "teleport_offline");
+            if (active == null || !online(active) || !permitted(player, entry, arrival.admin)) {
+                if (arrival.admin) plugin.msg(player, "admin_teleport_offline", "name", entry == null ? "?" : entry.name());
+                else plugin.msg(player, "teleport_offline");
                 return;
             }
             if (!pending.add(owner)) return;
-            execute(player, active, false, false);
+            execute(player, active, false, false, arrival.admin);
         }, null, 10);
     }
 
-    private void execute(Player player, DummyPlayers.Live active, boolean bring, boolean limited) {
+    private void execute(Player player, DummyPlayers.Live active, boolean bring, boolean limited, boolean admin) {
         UUID owner = player.getUniqueId();
-        int slot = active.entry.key.slot();
-        if (!online(active)) { finish(player, owner, slot, "teleport_offline"); return; }
-        if (!plugin.allowed(player, active.entry) || !player.hasPermission(DummyPlayers.TELEPORT)) {
-            finish(player, owner, slot, "no_permission");
+        Roster.Entry entry = active.entry;
+        if (!online(active)) { finish(player, entry, admin, "teleport_offline"); return; }
+        if (!permitted(player, entry, admin)) {
+            finish(player, entry, admin, "no_permission");
             return;
         }
         Player target = active.dummy.getBukkitEntity();
         Player anchor = bring ? player : target;
         Player traveler = bring ? target : player;
-        Runnable offline = () -> finish(player, owner, slot, "teleport_offline");
+        Runnable offline = () -> finish(player, entry, admin, "teleport_offline");
         if (!anchor.getScheduler().execute(plugin, () -> {
             if (!online(active)) { offline.run(); return; }
             Location anchorPosition = anchor.getLocation();
             Location destination = bring ? centered(anchorPosition) : anchorPosition;
             if (!traveler.getScheduler().execute(plugin, () -> {
                 if (!online(active)) { offline.run(); return; }
-                if (!bring && (!plugin.allowed(player, active.entry) || !player.hasPermission(DummyPlayers.TELEPORT))) {
-                    finish(player, owner, slot, "no_permission");
+                if (!bring && !permitted(player, entry, admin)) {
+                    finish(player, entry, admin, "no_permission");
                     return;
                 }
                 if (bring) {
-                    if (!player.isOnline()) { finish(player, owner, slot, "teleport_failed"); return; }
+                    if (!player.isOnline()) { finish(player, entry, admin, "teleport_failed"); return; }
                     Location facing = traveler.getLocation();
                     destination.setYaw(facing.getYaw());
                     destination.setPitch(facing.getPitch());
@@ -161,12 +176,12 @@ final class DummyTeleport {
                             boolean teleported = error == null && Boolean.TRUE.equals(success);
                             if (bring) active.relocating = false;
                             else if (teleported && limited) startCooldown(owner);
-                            finish(player, owner, slot, teleported ? (bring ? "bring_done" : "teleport_done") : "teleport_failed");
+                            finish(player, entry, admin, teleported ? (bring ? "bring_done" : "teleport_done") : "teleport_failed");
                         });
                 } catch (RuntimeException error) {
                     if (bring) active.relocating = false;
                     logFailure(active, error);
-                    finish(player, owner, slot, "teleport_failed");
+                    finish(player, entry, admin, "teleport_failed");
                 }
             }, offline, 1)) offline.run();
         }, offline, 1)) offline.run();
@@ -194,9 +209,22 @@ final class DummyTeleport {
         plugin.getLogger().log(Level.WARNING, "Could not teleport to fake player " + active.entry.profile(), error);
     }
 
-    private void finish(Player player, UUID owner, int slot, String message) {
-        pending.remove(owner);
-        player.getScheduler().execute(plugin, () -> plugin.msg(player, message, "slot", slot), null, 1);
+    /** 拥有者传送需要 teleport 权限；管理员传送需要 admin 权限。 */
+    private boolean permitted(Player player, Roster.Entry entry, boolean admin) {
+        if (!admin) return plugin.allowed(player, entry) && player.hasPermission(DummyPlayers.TELEPORT);
+        return player.hasPermission(DummyPlayers.ADMIN) && plugin.roster.entries.get(entry.key) == entry;
+    }
+
+    /** 管理员传送的提示按假人名字显示，不显示编号。 */
+    private static String key(String message, boolean admin) {
+        return admin && (message.equals("teleport_done") || message.equals("teleport_offline") || message.equals("teleport_connect"))
+            ? "admin_" + message : message;
+    }
+
+    private void finish(Player player, Roster.Entry entry, boolean admin, String message) {
+        pending.remove(player.getUniqueId());
+        player.getScheduler().execute(plugin, () -> plugin.msg(player, key(message, admin),
+            "slot", entry.key.slot(), "name", entry.name()), null, 1);
     }
 
 }

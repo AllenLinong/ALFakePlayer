@@ -72,6 +72,9 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
     private Database database;
     private final DummyTeleport teleports = new DummyTeleport(this);
     private final TabBenchmark benchmark = new TabBenchmark(this);
+    private final TestProfiles testProfiles = new TestProfiles(this);
+    private final TestChat testChat = new TestChat(this);
+    private volatile TestProfiles.Settings testSettings;
     private final RemoteTab remoteTab = new RemoteTab(this);
     /** 已注册的 PlaceholderAPI 扩展；用 Object 保存，未安装 PlaceholderAPI 时不会加载它的类。 */
     private Object placeholders;
@@ -81,10 +84,28 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
     private Groups groups = Groups.NONE;
     private volatile String luckPermsGroup = "default";
 
-    /** 与真实假人相同的 TAB 显示名：luckperms.group 权限组的前缀 + 名字。用于 /afp test 的测试条目。 */
-    Component testLabel(String name) {
-        return TEXT.deserialize(groups.groupPrefix(luckPermsGroup).replace('§', '&')).append(Component.text(name));
+    /** 测试假人的 TAB 显示名：权限组前缀 + 名字。 */
+    Component testLabel(String name, String group) {
+        return TEXT.deserialize(groupPrefix(group)).append(Component.text(name));
     }
+
+    /** 权限组自身的前缀（& 颜色代码）；组不存在或没有前缀时为空字符串。 */
+    String groupPrefix(String group) { return groups.groupPrefix(group).replace('§', '&'); }
+
+    Component legacy(String text) { return TEXT.deserialize(text); }
+
+    Groups groups() { return groups; }
+
+    String luckPermsGroup() { return luckPermsGroup; }
+
+    TestProfiles testProfiles() { return testProfiles; }
+
+    TabBenchmark benchmark() { return benchmark; }
+
+    TestChat testChat() { return testChat; }
+
+    /** 其他子服正在显示的测试假人名字（小写），本服选名字时避开。 */
+    Set<String> remoteTestNames() { return remoteTab.testNames(); }
     private DummyNames names;
     private volatile PurchasePrice purchasePrice;
     private FoliaBridge folia;
@@ -96,7 +117,7 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
     float passiveExhaustion;
     boolean lethalStarvation, unloadChests;
     Set<Material> foodBlacklist = Set.of();
-    private boolean ignoreHostileMobs, affectsSpawning, passiveSpawnsNeedPlayer;
+    private boolean ignoreHostileMobs, affectsSpawning, passiveSpawnsNeedPlayer, restoreAfterRestart;
     private boolean paidSummoning;
     private volatile boolean shuttingDown;
     /** 正在执行 reload：期间不接受指令和召唤。只在 admissions 锁内置为 true。 */
@@ -174,6 +195,7 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
             if (Bukkit.getPluginManager().isPluginEnabled("LuckPerms")) groups = new Groups.Luck();
             else getLogger().info("LuckPerms not installed; fake players still appear in the vanilla tab list.");
             names = new DummyNames(this);
+            loadTestProfiles();
             if (Bukkit.getPluginManager().isPluginEnabled("PlaceholderAPI")) {
                 try { placeholders = OnlinePlaceholders.register(this); }
                 catch (RuntimeException | LinkageError error) { getLogger().warning("Cannot register PlaceholderAPI placeholders: " + error); }
@@ -181,6 +203,8 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
             Objects.requireNonNull(getCommand("alfakeplayer")).setExecutor(this);
             Objects.requireNonNull(getCommand("alfakeplayer")).setTabCompleter(this);
             Bukkit.getPluginManager().registerEvents(this, this);
+            Bukkit.getPluginManager().registerEvents(testChat, this);
+            testChat.start();
             if (!NativeDummy.claimIdentitySupported()) {
                 getLogger().warning("This server build does not allow replacing the fake player's Bukkit object;"
                     + " claim plugins (claims.plugins) will treat fake players as separate players.");
@@ -191,8 +215,11 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
             saveTask = Bukkit.getGlobalRegionScheduler().runAtFixedRate(this, task -> roster.save(), saveInterval, saveInterval);
             Bukkit.getAsyncScheduler().runAtFixedRate(this, task -> roster.heartbeat(summonedCount(), Bukkit.getOnlinePlayers().size()),
                 1000, networkSettings.heartbeatMillis(), TimeUnit.MILLISECONDS);
-            // 其他插件全部启动后再检查经济服务，提示缺失的依赖
-            Bukkit.getGlobalRegionScheduler().runDelayed(this, task -> checkServices(), 1);
+            // 其他插件全部启动后再检查经济服务，提示缺失的依赖；多世界插件的世界也已加载，再召唤关服前在运行的假人
+            Bukkit.getGlobalRegionScheduler().runDelayed(this, task -> {
+                checkServices();
+                resummonAfterRestart();
+            }, 1);
         } catch (Exception | LinkageError error) {
             getLogger().log(Level.SEVERE, "Cannot start ALFakePlayer", error);
             Bukkit.getPluginManager().disablePlugin(this);
@@ -243,6 +270,8 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
             RosterMenus.validate(yaml);
         });
         YamlConfiguration text = loadMessages(configs, config.getString("language", "zh_CN"));
+        var tests = TestProfiles.Settings.read(configs.load("tab_test.yml", yaml -> { }), getLogger());
+        var chat = TestChat.Settings.read(configs.load("tab_chat.yml", yaml -> { }));
         int slotsMax = option(config, "slots.max_per_owner", 10, 1, 100);
         int slotsDefault = option(config, "slots.default", 1, 1, slotsMax);
         double coins = config.getDouble("purchase.coins", 300.0);
@@ -251,6 +280,7 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
             throw new IllegalArgumentException("config.yml: purchase.coins and purchase.points must be zero or positive");
         }
         int activeMax = option(config, "slots.max_active_server", 20, 0, 200);
+        boolean restoreOnStart = config.getBoolean("slots.restore_after_restart", true);
         var radius = new EnumMap<DummyTier, Integer>(DummyTier.class);
         var prices = new EnumMap<DummyTier, Double>(DummyTier.class);
         for (DummyTier tier : DummyTier.values()) {
@@ -296,6 +326,7 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
             maxSlots = slotsMax;
             baseSlots = slotsDefault;
             maxActive = activeMax;
+            restoreAfterRestart = restoreOnStart;
             // 购买所需物品保存在数据库中，重载时保留
             purchasePrice = new PurchasePrice(coins, points, purchasePrice == null ? List.of() : purchasePrice.items());
             tierRadius = radius;
@@ -320,7 +351,22 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
             teleports.configure(teleportDelay, teleportCooldown);
             luckPermsGroup = group;
             ClaimIdentity.configure(claimPlugins);
+            testSettings = tests;
+            testChat.configure(chat);
+            if (roster != null) loadTestProfiles();
         };
+    }
+
+    /** 读取或重载测试假人档案：补齐新名字的档案，给权限组已失效的档案重新抽组，再更新 TAB 中的显示名。 */
+    private void loadTestProfiles() {
+        testProfiles.load(testSettings).whenComplete((changed, error) -> {
+            if (error != null) {
+                getLogger().log(Level.WARNING, "Could not load the test player profiles", error);
+                return;
+            }
+            benchmark.reloaded();
+            benchmark.refreshLabels(changed);
+        });
     }
 
     private YamlConfiguration loadMessages(ConfigUpgrade configs, String locale) throws Exception {
@@ -354,7 +400,7 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
 
     // ══ 菜单与状态查询 ═════════════════════════════════════
 
-    String menuTierName(DummyTier tier) { return messages.getString("tier_name." + tier.key, tier.key); }
+    String menuTierName(DummyTier tier) { return text("tier_name." + tier.key, tier.key); }
     String menuPrice(DummyTier tier) {
         return BigDecimal.valueOf(paidSummoning ? tierPrices.get(tier) : 0).stripTrailingZeros().toPlainString();
     }
@@ -399,7 +445,7 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
     }
 
     String serverLabel(String server) {
-        return server == null ? messages.getString("other_server", "?") : roster.serverName(server);
+        return server == null ? text("other_server", "?") : roster.serverName(server);
     }
 
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
@@ -433,7 +479,7 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
     PurchasePrice purchasePrice() { return purchasePrice; }
 
     Component menuMessage(String key, String price) {
-        return itemText(messages.getString(key, key).replace("%price%", price));
+        return itemText(text(key, key).replace("%price%", price));
     }
 
     // ══ 购买 ══════════════════════════════════════════════
@@ -504,8 +550,8 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
 
     /** 带前缀的消息，%名称% 按 pairs（名称, 值, 名称, 值…）替换。 */
     Component message(String key, Object... pairs) {
-        String value = messages.getString(key, key);
-        Component rendered = TEXT.deserialize(messages.getString("prefix", "") + value);
+        String value = text(key, key);
+        Component rendered = TEXT.deserialize(text("prefix", "") + value);
         for (int index = 0; index + 1 < pairs.length; index += 2) {
             String token = "%" + pairs[index] + "%";
             Component text = Component.text(String.valueOf(pairs[index + 1]));
@@ -514,8 +560,19 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
         return rendered;
     }
 
+    /** 服务器上的语言文件缺少某条消息时，用插件自带的默认文本。getString(路径, 默认值) 不会读取默认文件，所以不能直接用。 */
+    private String text(String key, String fallback) {
+        String value = messages.getString(key);
+        return value != null ? value : fallback;
+    }
+
     /** 不带前缀的消息文字，用于按钮等。 */
-    Component messageText(String key) { return TEXT.deserialize(messages.getString(key, key)); }
+    Component messageText(String key) { return TEXT.deserialize(text(key, key)); }
+
+    /** 不带颜色的消息文字，用于填进另一条消息的 %占位符%。 */
+    String messagePlain(String key) {
+        return net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer.plainText().serialize(messageText(key));
+    }
 
     /** 回到发送者所在线程执行（玩家用实体调度器，后台用全局调度器）。 */
     private void tell(CommandSender sender, Runnable action) {
@@ -716,7 +773,7 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
         }
         roster.save();
         msg(player, "spawned", "name", entry.name(), "slot", entry.key.slot(),
-            "tier", messages.getString("tier_name." + tier.key, tier.key),
+            "tier", text("tier_name." + tier.key, tier.key),
             "chunks", tierRadius.get(tier) * 2 + 1);
         if (fee != null) msg(player, "economy_paid", "price", cost);
         return true;
@@ -811,7 +868,7 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
     }
 
     /** 把本服 /afp test 的测试条目（整份）发给其他子服显示；to 为 null 时广播。 */
-    private void shareTests(String to) {
+    void shareTests(String to) {
         if (network == null || !network.enabled()) return;
         var entries = new com.google.gson.JsonArray();
         benchmark.entries().forEach((id, shown) -> {
@@ -1044,7 +1101,8 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
             case "session" -> roster.remoteSession(uuid(body, "dummy"), from, body.get("live").getAsBoolean());
             case "release" -> remoteRelease(uuid(body, "dummy"), body.get("mode").getAsString(), reply);
             case "settings" -> remoteSettings(uuid(body, "dummy"), body);
-            case "arrival" -> teleports.expect(uuid(body, "player"), uuid(body, "dummy"));
+            case "arrival" -> teleports.expect(uuid(body, "player"), uuid(body, "dummy"),
+                body.has("admin") && body.get("admin").getAsBoolean());
             case "clear" -> Bukkit.getGlobalRegionScheduler().execute(this, this::clearLocal);
             case "tab" -> remoteTab.label(uuid(body, "dummy"), body.get("name").getAsString(), body.get("label").getAsString());
             case "tab_request" -> {
@@ -1225,6 +1283,21 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
         }
     }
 
+    /**
+     * 假人挖掘、收割掉下来的东西直接放到它脚下（此时还没加入世界）。
+     * 原版掉落物会随机弹开，农作物常常弹到一格半以外，超出假人的拾取范围。
+     */
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void onBlockDrop(org.bukkit.event.block.BlockDropItemEvent event) {
+        Live active = live.get(event.getPlayer().getUniqueId());
+        if (active == null) return;
+        for (org.bukkit.entity.Item item : event.getItems()) {
+            if (!(item instanceof CraftItem craft)) continue;
+            craft.getHandle().setPos(active.dummy.getX(), active.dummy.getY(), active.dummy.getZ());
+            craft.getHandle().setDeltaMovement(net.minecraft.world.phys.Vec3.ZERO);
+        }
+    }
+
     /** 领地插件在本插件之后启用、或被单独重载时，重新登记它的类加载器。 */
     @EventHandler public void onPluginEnable(PluginEnableEvent event) { ClaimIdentity.refresh(null); }
     @EventHandler public void onPluginDisable(PluginDisableEvent event) { ClaimIdentity.refresh(event.getPlugin()); }
@@ -1324,7 +1397,7 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
             if (!target.isOnline()) { offline.run(); return; }
             ItemStack card = ItemStack.of(Material.PAPER, amount);
             card.editMeta(meta -> {
-                meta.displayName(itemText(messages.getString("rename_card.name", "&6黑奴改名卡")));
+                meta.displayName(itemText(text("rename_card.name", "&6黑奴改名卡")));
                 meta.lore(messages.getStringList("rename_card.lore").stream().map(DummyPlayers::itemText).toList());
                 meta.getPersistentDataContainer().set(RENAME_CARD, PersistentDataType.BYTE, (byte) 1);
             });
@@ -1359,6 +1432,7 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
             case "grant", "set" -> { grantCommand(sender, admin, action.equals("set"), args); return true; }
             case "card" -> { giveRenameCards(sender, args); return true; }
             case "b" -> { inventoryCommand(sender, admin, args); return true; }
+            case "atp" -> { adminTeleportCommand(sender, admin, args); return true; }
             case "items" -> {
                 if (!admin) msg(sender, "no_permission");
                 else if (sender instanceof Player player) rosterMenus.openPurchaseItems(player);
@@ -1370,10 +1444,7 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
             case "reload" -> { reloadCommand(sender); return true; }
             case "test" -> {
                 if (!admin) msg(sender, "no_permission");
-                else {
-                    benchmark.command(sender, args);
-                    shareTests(null);
-                }
+                else testCommand(sender, args);
                 return true;
             }
             default -> { }
@@ -1484,6 +1555,98 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
         if (!player.hasPermission(TELEPORT)) msg(player, "no_permission");
         else if (slot < 1) msg(player, bring ? "bring_help" : "teleport_help");
         else teleports.request(player, slot, bring);
+    }
+
+    /** atp <名字>、atp <玩家> <编号>：管理员传送到任意玩家的假人，支持其他子服，没有等待和冷却。 */
+    private void adminTeleportCommand(CommandSender sender, boolean admin, String[] args) {
+        if (!admin) { msg(sender, "no_permission"); return; }
+        if (!(sender instanceof Player player)) { msg(sender, "player_only"); return; }
+        Roster.Entry entry;
+        if (args.length == 2 && integer(args[1]) < 1) {
+            entry = roster.entries.values().stream().filter(bot -> bot.matchesName(args[1])).findFirst().orElse(null);
+            if (entry == null) { msg(player, "admin_teleport_not_found", "name", args[1]); return; }
+        } else if (args.length == 3 && integer(args[2]) > 0) {
+            int slot = integer(args[2]);
+            UUID owner = playerId(args[1]);
+            entry = owner == null ? null : roster.entries.get(new Roster.Key(owner, slot));
+            if (entry == null) { msg(player, "inventory_not_found", "player", args[1], "slot", slot); return; }
+        } else { msg(player, "admin_teleport_help"); return; }
+        teleports.adminRequest(player, entry);
+    }
+
+    /** test <数量> | stop | info <名字> | group <名字> <组> | say <名字> <内容> | chat | ai：TAB 测试假人。 */
+    private void testCommand(CommandSender sender, String[] args) {
+        String sub = args.length >= 2 ? args[1].toLowerCase(Locale.ROOT) : "";
+        if (args.length == 2 && sub.equals("stop")) { msg(sender, "benchmark_stopped", "count", benchmark.clear()); return; }
+        if (args.length == 2 && sub.equals("chat")) { chatStatus(sender); return; }
+        if (args.length == 2 && sub.equals("ai")) { testAi(sender); return; }
+        if (!testProfiles.ready()) { msg(sender, "benchmark_loading"); return; }
+        if (args.length >= 4 && sub.equals("say")) {
+            String text = String.join(" ", Arrays.copyOfRange(args, 3, args.length));
+            if (testChat.say(args[2], text)) msg(sender, "benchmark_said", "name", args[2]);
+            else msg(sender, "benchmark_not_shown", "name", args[2]);
+            return;
+        }
+        if (args.length == 3 && sub.equals("info")) {
+            var profile = testProfiles.profile(args[2]);
+            if (profile == null) msg(sender, "benchmark_not_found", "name", args[2]);
+            else msg(sender, benchmark.shown(profile.id()) ? "benchmark_info_shown" : "benchmark_info_hidden",
+                "name", profile.name(), "group", profile.group(), "uuid", profile.id(),
+                "talk", messagePlain(testChat.talkative(profile.id()) ? "benchmark_talkative" : "benchmark_lurker"),
+                "persona", testChat.persona(profile.id()));
+            return;
+        }
+        if (args.length == 4 && sub.equals("group")) {
+            var profile = testProfiles.profile(args[2]);
+            if (profile == null) { msg(sender, "benchmark_not_found", "name", args[2]); return; }
+            String group = args[3].toLowerCase(Locale.ROOT);
+            testProfiles.setGroup(profile.name(), group).whenComplete((done, error) -> tell(sender, () -> {
+                if (error != null) {
+                    getLogger().log(Level.WARNING, "Could not save the group of test player " + profile.name(), error);
+                    msg(sender, "storage_error");
+                } else if (!done) {
+                    msg(sender, "benchmark_group_invalid", "group", group, "groups", String.join(", ", testProfiles.availableGroups()));
+                } else {
+                    benchmark.refreshLabels(Set.of(profile.name().toLowerCase(Locale.ROOT)));
+                    msg(sender, "benchmark_group_set", "name", profile.name(), "group", group);
+                }
+            }));
+            return;
+        }
+        int count = args.length == 2 ? integer(args[1]) : -1;
+        if (count < 1 || count > TabBenchmark.MAX_ENTRIES) { msg(sender, "benchmark_help", "max", TabBenchmark.MAX_ENTRIES); return; }
+        var plan = benchmark.setTarget(count);
+        if (plan.target() < count) msg(sender, "benchmark_capped", "count", plan.target());
+        if (plan.seconds() == 0) msg(sender, "benchmark_spawned", "count", plan.target());
+        else msg(sender, "benchmark_ramping", "count", plan.target(), "seconds", plan.seconds());
+    }
+
+    /** /afp test chat：聊天的发送方式、排队和限流情况、AI 状态。 */
+    private void chatStatus(CommandSender sender) {
+        var settings = testChat.settings();
+        if (settings == null || !settings.enabled()) { msg(sender, "benchmark_chat_disabled"); return; }
+        String plugin = TestChat.formattingPlugin();
+        String mode = testChat.viaServerChat() ? messagePlain("benchmark_chat_via_server") + (plugin == null ? "" : "（" + plugin + "）")
+            : messagePlain("benchmark_chat_via_format");
+        var ai = testChat.ai();
+        String aiState = !ai.usable() ? messagePlain("benchmark_ai_off")
+            : ai.settings().model() + "，" + messagePlain("benchmark_ai_today") + " " + ai.usage()
+                + (ai.lastError().isEmpty() ? "" : "，" + messagePlain("benchmark_ai_last_error") + " " + ai.lastError());
+        String[] status = testChat.status();
+        msg(sender, "benchmark_chat_status", "mode", mode, "queued", status[0], "sent", status[1], "capacity", status[2],
+            "window", status[3], "ai", aiState);
+    }
+
+    /** /afp test ai：发一个测试请求，确认 AI 的地址、Key 和模型可用。 */
+    private void testAi(CommandSender sender) {
+        var ai = testChat.ai();
+        if (!ai.usable()) { msg(sender, "benchmark_ai_disabled"); return; }
+        msg(sender, "benchmark_ai_testing", "model", ai.settings().model());
+        long start = System.currentTimeMillis();
+        ai.test().whenComplete((reply, error) -> tell(sender, () -> {
+            if (error == null) msg(sender, "benchmark_ai_ok", "model", ai.settings().model(), "millis", System.currentTimeMillis() - start, "reply", reply);
+            else msg(sender, "benchmark_ai_failed", "error", ai.lastError().isEmpty() ? String.valueOf(error.getCause() != null ? error.getCause().getMessage() : error) : ai.lastError());
+        }));
     }
 
     /** 按编号（只找自己的）或名字（管理员可找任意玩家的）查找假人。 */
@@ -1735,7 +1898,7 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
             if (teleport) options.addAll(List.of("tp", "tph"));
             if (admin) {
                 options.addAll(List.of("admin", "grant", "set", "card", "despawn", "delete", "clear", "servers", "reload", "test"));
-                if (sender instanceof Player) options.add("items");
+                if (sender instanceof Player) options.addAll(List.of("items", "atp"));
             }
         } else if (args.length == 2) {
             switch (first) {
@@ -1754,6 +1917,15 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
                         if (!running(entry)) continue;
                         options.add(String.valueOf(entry.key.slot()));
                         options.add(entry.name());
+                    }
+                }
+                case "atp" -> {
+                    if (admin && sender instanceof Player) {
+                        for (Roster.Entry entry : roster.entries.values()) {
+                            if (options.size() >= MAX_COMPLETIONS) break;
+                            if (running(entry) && entry.name().toLowerCase(Locale.ROOT).startsWith(prefix)) options.add(entry.name());
+                        }
+                        for (Player target : Bukkit.getOnlinePlayers()) if (!fake(target)) options.add(target.getName());
                     }
                 }
                 case "despawn", "delete" -> {
@@ -1783,12 +1955,24 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
                     }
                 }
                 case "test" -> {
-                    if (admin) options.addAll(List.of("stop", "10", "25", "50", String.valueOf(TabBenchmark.MAX_ENTRIES)));
+                    if (admin) options.addAll(List.of("stop", "info", "group", "say", "chat", "ai", "10", "50", "100",
+                        String.valueOf(TabBenchmark.MAX_ENTRIES)));
                 }
                 default -> { }
             }
         } else if (args.length == 3 && self != null && first.equals("spawn")) options.addAll(TIER_NAMES);
-        else if (args.length == 3 && admin && sender instanceof Player && first.equals("b")) {
+        else if (args.length == 3 && admin && first.equals("test") && args[1].equalsIgnoreCase("say")) {
+            benchmark.entries().values().forEach(shown -> options.add(shown.name()));
+        }
+        else if (args.length == 3 && admin && first.equals("test") && (args[1].equalsIgnoreCase("info") || args[1].equalsIgnoreCase("group"))) {
+            // 已在 TAB 中的排在前面
+            var shownNames = new ArrayList<String>();
+            benchmark.entries().values().forEach(shown -> shownNames.add(shown.name()));
+            options.addAll(shownNames);
+            if (testProfiles.ready()) testProfiles.pool().forEach(profile -> options.add(profile.name()));
+        }
+        else if (args.length == 4 && admin && first.equals("test") && args[1].equalsIgnoreCase("group")) options.addAll(testProfiles.availableGroups());
+        else if (args.length == 3 && admin && sender instanceof Player && (first.equals("b") || first.equals("atp"))) {
             // 只查在线玩家和本服缓存，不遍历离线玩家
             Player online = Bukkit.getPlayerExact(args[1]);
             var target = online != null ? online : Bukkit.getOfflinePlayerIfCached(args[1]);
@@ -1948,16 +2132,87 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
         body.setExhaustion(state.exhaustion);
     }
 
+    // ══ 开服恢复 ════════════════════════════════════════════
+
+    /** 关服前记下的假人：开启 slots.restore_after_restart 时在原位置召唤回来，不收费；关闭时只清除记录。 */
+    private void resummonAfterRestart() {
+        roster.takeRestores().whenComplete((points, error) -> {
+            if (error != null) {
+                getLogger().log(Level.WARNING, "Could not read the fake players to re-summon after restart", error);
+                return;
+            }
+            if (!points.isEmpty() && restoreAfterRestart) Bukkit.getGlobalRegionScheduler().execute(this, () -> restorePoints(points));
+        });
+    }
+
+    /**
+     * 逐个获取运行租约，再在原位置召唤。主人的假人数被调低、本服在线上限已满、世界不存在，
+     * 或者假人已被删除、正在其他子服运行时跳过；跳过的假人留在存档中，玩家可以再召唤。
+     */
+    private void restorePoints(List<Roster.RestorePoint> points) {
+        var remaining = new AtomicInteger(points.size());
+        var restored = new AtomicInteger();
+        Consumer<Boolean> done = spawned -> {
+            if (spawned) restored.incrementAndGet();
+            if (remaining.decrementAndGet() == 0) {
+                getLogger().info("Re-summoned " + restored.get() + "/" + points.size() + " fake player(s) that were running before the restart.");
+            }
+        };
+        for (Roster.RestorePoint point : points) {
+            Roster.Entry entry = roster.byId.get(point.dummy());
+            World world = Bukkit.getWorld(point.world());
+            String skipped = null;
+            if (entry == null) skipped = "it was deleted";
+            else if (world == null) skipped = "world '" + point.world() + "' is not loaded";
+            else if (entry.key.slot() > slots(entry.key.owner())) skipped = "its owner no longer has slot " + entry.key.slot();
+            else if (!shuttingDown) synchronized (admissions) {
+                if (live.containsKey(entry.id) || pending.contains(entry.id)) skipped = "it is already summoned";
+                else if (live.size() + pending.size() >= maxActive) skipped = "slots.max_active_server is reached";
+                else pending.add(entry.id);
+            }
+            else skipped = "the server is stopping";
+            if (skipped != null) {
+                getLogger().info("Not re-summoning " + (entry == null ? point.dummy() : entry.name()) + " after restart: " + skipped + ".");
+                done.accept(false);
+                continue;
+            }
+            var position = new Location(world, point.x(), point.y(), point.z(), point.yaw(), point.pitch());
+            var state = new Parked(entry, position, point.health(), point.food(), point.saturation(), point.exhaustion(), List.of());
+            roster.acquire(entry, true).whenComplete((claim, problem) -> {
+                if (problem != null || claim.status() != Roster.Claim.ACQUIRED) {
+                    if (problem != null) getLogger().log(Level.WARNING, "Could not re-summon " + entry.profile() + " after restart", problem);
+                    else getLogger().info("Not re-summoning " + entry.name() + " after restart: it is running on "
+                        + serverLabel(claim.holder()) + ".");
+                    clearPending(entry);
+                    done.accept(false);
+                    return;
+                }
+                parked.put(entry.id, state);
+                // 开服后假人所在区块多半没有加载，先加载再召唤
+                world.getChunkAtAsync(position).whenComplete((chunk, loadError) -> restore(state, done));
+            });
+        }
+    }
+
     // ══ 关闭 ══════════════════════════════════════════════
+
+    private static Roster.RestorePoint restorePoint(Live active) {
+        Player body = active.dummy.getBukkitEntity();
+        Location at = body.getLocation();
+        return new Roster.RestorePoint(active.entry.id, at.getWorld().getName(), at.getX(), at.getY(), at.getZ(),
+            at.getYaw(), at.getPitch(), body.getHealth(), body.getFoodLevel(), body.getSaturation(), body.getExhaustion());
+    }
 
     @Override public void onDisable() {
         shuttingDown = true;
         synchronized (admissions) { pending.clear(); }
         boolean stopping = Bukkit.isStopping();
         int removed = 0;
+        var resummon = new ArrayList<Roster.RestorePoint>();
         if (folia != null) for (Live active : List.copyOf(live.values())) {
             try {
                 if (stopping) snapshot(active);
+                if (stopping && restoreAfterRestart && isSummoned(active)) resummon.add(restorePoint(active));
                 if (stopping && folia.regionThreaded()) {
                     if (!folia.inShutdownRegion(active.dummy, () -> unlink(active, false))) {
                         active.inWorld = false;
@@ -1978,7 +2233,12 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
             catch (RuntimeException | LinkageError error) { getLogger().log(Level.SEVERE, "Fake player cleanup failed", error); }
         }
         if (stopping && removed > 0) getLogger().info("Recalled " + removed + " summoned fake player(s).");
+        if (stopping && restoreAfterRestart && roster != null) {
+            roster.saveRestores(resummon);
+            if (!resummon.isEmpty()) getLogger().info(resummon.size() + " fake player(s) will be re-summoned after the restart.");
+        }
         try {
+            testChat.stop();
             benchmark.close();
             shareTests(null); // 通知其他子服删除本服的测试条目；没送达时，它们会在本服心跳超时后删除
             remoteTab.close();

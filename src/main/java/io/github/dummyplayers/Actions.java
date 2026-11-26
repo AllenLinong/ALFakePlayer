@@ -4,6 +4,10 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.core.component.DataComponents;
 import net.minecraft.network.protocol.game.*;
+import net.minecraft.server.level.ServerLevel;
+import net.minecraft.sounds.SoundEvents;
+import net.minecraft.sounds.SoundSource;
+import net.minecraft.stats.Stats;
 import net.minecraft.tags.BlockTags;
 import net.minecraft.tags.FluidTags;
 import net.minecraft.tags.TagKey;
@@ -14,14 +18,17 @@ import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.decoration.ArmorStand;
 import net.minecraft.world.entity.projectile.FishingHook;
+import net.minecraft.world.entity.projectile.Projectile;
 import net.minecraft.world.entity.projectile.ProjectileUtil;
 import net.minecraft.world.item.BlockItem;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
 import net.minecraft.world.item.component.AttackRange;
+import net.minecraft.world.item.enchantment.EnchantmentHelper;
 import net.minecraft.world.level.ClipContext;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.gameevent.GameEvent;
 import net.minecraft.world.phys.*;
 import org.bukkit.Bukkit;
 import org.bukkit.Material;
@@ -163,7 +170,7 @@ final class Actions {
             BlockState state = dummy.level().getBlockState(miningTarget.getBlockPos());
             boolean matches = miningTool(dummy.getMainHandItem(), state) && usable(dummy.getMainHandItem(), plugin.minimumDurability);
             if (!matches && tick >= nextToolSearch) {
-                matches = equip(stack -> miningTool(stack, state), plugin.minimumDurability, true);
+                matches = equip(stack -> miningTool(stack, state), plugin.minimumDurability);
                 if (!matches) nextToolSearch = tick + 10;
             }
             if (matches && miningTool(dummy.getMainHandItem(), state) && usable(dummy.getMainHandItem(), plugin.minimumDurability)) {
@@ -191,10 +198,8 @@ final class Actions {
                 return;
             }
             if (dummy.isCreative() || !(CraftMagicNumbers.getItem(placementBlock) instanceof BlockItem blockItem)) return;
-            // 主手或副手已经拿着就直接用；否则从背包换到主手
-            InteractionHand hand = InteractionHand.MAIN_HAND;
-            if (!dummy.getMainHandItem().is(blockItem) && dummy.getOffhandItem().is(blockItem)) hand = InteractionHand.OFF_HAND;
-            else if (!equipPlacement(blockItem)) {
+            InteractionHand hand = equipPlacement(blockItem);
+            if (hand == null) {
                 nextUse = tick + Math.max(plugin.useInterval, plugin.idleMaxInterval);
                 return;
             }
@@ -233,8 +238,11 @@ final class Actions {
             if (!caught && !stuck && !hooked && tick - castTick < 1200) return;
             bite = false;
             useRod(rod);
-            castFailures = stuck ? castFailures + 1 : 0;
-            nextCast = tick + (caught ? 10 : retryDelay());
+            // 收竿被其他插件取消时鱼钩还在：自己收回，免得鱼线一直挂着
+            boolean refused = !hook.isRemoved();
+            if (refused) hook.discard();
+            castFailures = stuck || refused ? castFailures + 1 : 0;
+            nextCast = tick + (caught && !refused ? 10 : retryDelay());
             return;
         }
         bite = false;
@@ -245,10 +253,10 @@ final class Actions {
         // 浮漂按抛竿时的视角飞出，先低头对准水面
         pitch = aim;
         faceWorkDirection();
-        useRod(rod);
+        castRod(rod);
         castTick = tick;
         dryTicks = 0;
-        // 抛竿被其他插件取消（例如领地禁止钓鱼）时稍后再试
+        // 浮漂没能生成（例如被其他插件阻止）时稍后再试
         if (dummy.fishing == null) { castFailures++; nextCast = tick + retryDelay(); }
     }
 
@@ -259,6 +267,28 @@ final class Actions {
         if (dummy.gameMode.useItem(dummy, dummy.level(), rod, InteractionHand.MAIN_HAND).consumesAction()) {
             dummy.getBukkitEntity().swingMainHand();
         }
+    }
+
+    /**
+     * 按原版抛竿（饵钓、海之眷顾照常生效），但不触发抛竿的 PlayerFishEvent。
+     * CustomFishing 等钓鱼插件在这个事件里接管鱼钩、改成自己的小游戏，之后取消收竿等玩家玩小游戏；假人玩不了，
+     * 鱼线就一直收不回来。不经过这个事件，这些插件就不会接管假人的鱼钩，咬钩、收竿和钓到的东西都按原版。
+     */
+    private void castRod(ItemStack rod) {
+        if (!(dummy.level() instanceof ServerLevel level)) return;
+        int lureSpeed = (int) (EnchantmentHelper.getFishingTimeReduction(level, rod, dummy) * 20.0F);
+        int luck = EnchantmentHelper.getFishingLuckBonus(level, rod, dummy);
+        FishingHook hook = new FishingHook(dummy, level, luck, lureSpeed);
+        if (!Projectile.spawnProjectileDelayed(hook, level, rod, spawned -> { }).attemptSpawn()) {
+            hook.discard();
+            dummy.fishing = null;
+            return;
+        }
+        level.playSound(null, dummy.getX(), dummy.getY(), dummy.getZ(), SoundEvents.FISHING_BOBBER_THROW, SoundSource.NEUTRAL,
+            0.5F, 0.4F / (level.getRandom().nextFloat() * 0.4F + 0.8F));
+        dummy.awardStat(Stats.ITEM_USED.get(Items.FISHING_ROD));
+        rod.causeUseVibration(dummy, GameEvent.ITEM_INTERACT_START);
+        dummy.getBukkitEntity().swingMainHand();
     }
 
     /** 往前最多查看这么远找水和水的尽头。 */
@@ -454,19 +484,25 @@ final class Actions {
         return BlockHitResult.miss(dummy.getEyePosition(), Direction.UP, front);
     }
 
-    private boolean equipPlacement(BlockItem blockItem) {
+    /**
+     * 要放置的东西拿在哪只手上：主手或副手已经拿着就直接用；否则从背包拿出来，
+     * 主手空着就放主手，主手拿着工具等东西时放副手（副手原来的东西换到它原来的格子），这样挖掘、收割的工具不用来回换。
+     * 背包里没有时为 null。
+     */
+    private InteractionHand equipPlacement(BlockItem blockItem) {
         var inventory = dummy.getInventory();
-        ItemStack current = inventory.getItem(0);
-        if (current.is(blockItem)) { select(0); return true; }
+        select(0);
+        if (inventory.getItem(0).is(blockItem)) return InteractionHand.MAIN_HAND;
+        if (inventory.getItem(40).is(blockItem)) return InteractionHand.OFF_HAND;
         for (int slot = 1; slot < 36; slot++) {
             ItemStack candidate = inventory.getItem(slot);
             if (!candidate.is(blockItem)) continue;
-            inventory.setItem(slot, current);
-            inventory.setItem(0, candidate);
-            select(0);
-            return true;
+            int hand = inventory.getItem(0).isEmpty() ? 0 : 40;
+            inventory.setItem(slot, inventory.getItem(hand));
+            inventory.setItem(hand, candidate);
+            return hand == 0 ? InteractionHand.MAIN_HAND : InteractionHand.OFF_HAND;
         }
-        return false;
+        return null;
     }
 
     private static boolean canTarget(Entity entity) { return entity.isPickable() && !entity.isSpectator(); }
@@ -512,7 +548,11 @@ final class Actions {
             && Bukkit.isOwnedByCurrentRegion(target.getBukkitEntity());
     }
 
-    /** plant 不为 null 时正在自动种植：正前方一格的植物和土类地面不挖。 */
+    /**
+     * 挖掘目标：正前方一列，先上格后下格。快捷栏第 3~9 格放了方块或农作物（样本）时只挖同类，没放时挖工具能挖的一切。
+     * 成熟的农作物用锄头收割，只收正前方一格（掉落物在假人的拾取范围内）。
+     * plant 不为 null 时正在自动种植：正前方一格的土类地面和还没成熟的植物不挖。
+     */
     private BlockHitResult miningTarget(Vec3 eye, double reach, int minimumDurability, Block plant) {
         Direction forward = Direction.fromYRot(yaw);
         BlockPos origin = feet();
@@ -522,11 +562,11 @@ final class Actions {
         var level = dummy.level();
         var inventory = dummy.getInventory();
         Set<Block> samples = null;
-        for (int slot = 0; slot < 9; slot++) {
-            ItemStack sample = inventory.getItem(slot);
-            if (sample.isEmpty() || !(sample.getItem() instanceof BlockItem blockItem)) continue;
+        for (int slot = SAMPLE_START; slot < 9; slot++) {
+            Block sample = sampleBlock(inventory.getItem(slot));
+            if (sample == null) continue;
             if (samples == null) samples = new java.util.HashSet<>();
-            samples.add(blockItem.getBlock());
+            samples.add(sample);
         }
         for (int distance = 1; distance <= lastColumn; distance++) {
             BlockPos lower = origin.relative(forward, distance);
@@ -534,12 +574,12 @@ final class Actions {
             BlockPos upper = lower.above();
             BlockState upperState = level.getBlockState(upper);
             boolean keep = plant != null && distance == 1;
-            if (matchesSample(samples, upperState) && !(keep && (upperState.is(plant) || soil(upperState)))) {
+            if (mineable(samples, upperState, distance) && !(keep && keepForPlanting(upperState, plant))) {
                 BlockHitResult hit = miningHit(eye, reach, upper, upperState, minimumDurability);
                 if (hit != null) return hit;
             }
             BlockState lowerState = level.getBlockState(lower);
-            if (matchesSample(samples, lowerState) && !(keep && (lowerState.is(plant) || soil(lowerState)))) {
+            if (mineable(samples, lowerState, distance) && !(keep && keepForPlanting(lowerState, plant))) {
                 BlockHitResult hit = miningHit(eye, reach, lower, lowerState, minimumDurability);
                 if (hit != null) return hit;
             }
@@ -560,6 +600,46 @@ final class Actions {
             && dummy.level().hasChunkAt(position);
     }
 
+    /** 快捷栏从第 3 格开始是挖掘样本；第 1、2 格留给工具和要放置的东西。 */
+    private static final int SAMPLE_START = 2;
+
+    /** 样本对应的方块。小麦、甜菜根本身不能放置，对应它们的农作物；种子、胡萝卜、马铃薯等本来就对应农作物。 */
+    private static Block sampleBlock(ItemStack stack) {
+        if (stack.isEmpty()) return null;
+        if (stack.getItem() instanceof BlockItem blockItem) return blockItem.getBlock();
+        if (stack.is(Items.WHEAT)) return net.minecraft.world.level.block.Blocks.WHEAT;
+        if (stack.is(Items.BEETROOT)) return net.minecraft.world.level.block.Blocks.BEETROOTS;
+        return null;
+    }
+
+    /** 小麦、胡萝卜、马铃薯、甜菜根等农作物，以及下界疣、可可豆：用锄头收割。 */
+    private static boolean crop(BlockState state) {
+        Block block = state.getBlock();
+        return block instanceof net.minecraft.world.level.block.CropBlock
+            || block instanceof net.minecraft.world.level.block.NetherWartBlock
+            || block instanceof net.minecraft.world.level.block.CocoaBlock;
+    }
+
+    private static boolean ripe(BlockState state) {
+        return switch (state.getBlock()) {
+            case net.minecraft.world.level.block.CropBlock cropBlock -> cropBlock.isMaxAge(state);
+            case net.minecraft.world.level.block.NetherWartBlock ignored ->
+                state.getValue(net.minecraft.world.level.block.NetherWartBlock.AGE) >= net.minecraft.world.level.block.NetherWartBlock.MAX_AGE;
+            case net.minecraft.world.level.block.CocoaBlock ignored ->
+                state.getValue(net.minecraft.world.level.block.CocoaBlock.AGE) >= net.minecraft.world.level.block.CocoaBlock.MAX_AGE;
+            default -> false;
+        };
+    }
+
+    private static boolean mineable(Set<Block> samples, BlockState state, int distance) {
+        return matchesSample(samples, state) && !(crop(state) && (distance > 1 || !ripe(state)));
+    }
+
+    /** 自动种植时正前方一格要留着的：土类地面，和种下去还没成熟的植物。 */
+    private static boolean keepForPlanting(BlockState state, Block plant) {
+        return soil(state) || state.is(plant) && !(crop(state) && ripe(state));
+    }
+
     private static boolean matchesSample(Set<Block> samples, BlockState state) {
         return samples == null || samples.contains(state.getBlock())
             || state.getBlock() instanceof net.minecraft.world.level.block.AnvilBlock
@@ -570,10 +650,14 @@ final class Actions {
         var level = dummy.level();
         if (state.isAir() || level.isOutsideBuildHeight(target) || !level.mayInteract(dummy, target)
             || state.getDestroySpeed(level, target) < 0) return null;
-        Vec3 center = Vec3.atCenterOf(target);
+        // 对准方块外形的中心：农作物等矮方块的中心比方块中心低
+        var outline = state.getShape(level, target);
+        AABB box = outline.isEmpty() ? new AABB(target) : outline.bounds().move(target);
+        Vec3 center = box.getCenter();
         if (eye.y > center.y) {
             Direction towardDummy = Direction.fromYRot(yaw).getOpposite();
-            center = center.add(towardDummy.getStepX() * 0.49, 0, towardDummy.getStepZ() * 0.49);
+            double edge = towardDummy.getAxis() == Direction.Axis.X ? box.getXsize() : box.getZsize();
+            center = center.add(towardDummy.getStepX() * edge * 0.49, 0, towardDummy.getStepZ() * edge * 0.49);
         }
         BlockHitResult hit = level.clip(new ClipContext(eye, center, ClipContext.Block.OUTLINE, ClipContext.Fluid.NONE, dummy));
         if (hit.getType() != HitResult.Type.BLOCK || !target.equals(hit.getBlockPos())
@@ -588,6 +672,8 @@ final class Actions {
 
     private static boolean miningTool(ItemStack stack, BlockState state) {
         if (stack.isEmpty()) return false;
+        // 农作物只用锄头收，并且只收成熟的
+        if (crop(state)) return stack.is(ItemTags.HOES) && ripe(state);
         var tool = stack.get(DataComponents.TOOL);
         if (tool == null) return false;
         if (state.requiresCorrectToolForDrops()) return stack.isCorrectToolForDrops(state);
@@ -649,36 +735,22 @@ final class Actions {
     }
 
     private boolean equip(Predicate<ItemStack> match, int minimumDurability) {
-        return equip(match, minimumDurability, false);
-    }
-
-    private boolean equip(Predicate<ItemStack> match, int minimumDurability, boolean preserveSample) {
         var inventory = dummy.getInventory();
         ItemStack current = inventory.getItem(0);
         if (match.test(current) && usable(current, minimumDurability)) return true;
-        boolean sampleInMain = preserveSample && !current.isEmpty() && current.getItem() instanceof BlockItem;
-        int sampleSlot = -1;
-        if (sampleInMain) {
-            for (int slot = 1; slot < 9; slot++) {
-                if (inventory.getItem(slot).isEmpty()) { sampleSlot = slot; break; }
-            }
-        }
         for (int slot = 1; slot < 36; slot++) {
-            if (sampleInMain && slot >= 9 && sampleSlot < 0) return false;
             ItemStack candidate = inventory.getItem(slot);
             if (!match.test(candidate) || !usable(candidate, minimumDurability)) continue;
             stopMining();
             if (!match.test(inventory.getItem(slot)) || !usable(inventory.getItem(slot), minimumDurability)) return false;
-            if (sampleInMain) swapToHand(slot, 0, slot < 9 ? slot : sampleSlot);
-            else moveToHand(slot, 0);
+            moveToHand(slot, 0);
             return true;
         }
         ItemStack offhand = inventory.getItem(40);
-        if (sampleInMain && sampleSlot < 0 || !match.test(offhand) || !usable(offhand, minimumDurability)) return false;
+        if (!match.test(offhand) || !usable(offhand, minimumDurability)) return false;
         stopMining();
         if (!match.test(inventory.getItem(40)) || !usable(inventory.getItem(40), minimumDurability)) return false;
-        if (sampleInMain) swapToHand(40, 0, sampleSlot);
-        else moveToHand(40, 0);
+        moveToHand(40, 0);
         return true;
     }
 
