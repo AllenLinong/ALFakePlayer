@@ -53,7 +53,7 @@ import java.util.logging.Level;
 public final class DummyPlayers extends JavaPlugin implements Listener, TabExecutor {
     static final String USE = "alfakeplayer.use", ADMIN = "alfakeplayer.admin", TELEPORT = "alfakeplayer.teleport";
     private static final List<String> TIER_NAMES = List.of("normal", "pro", "promax");
-    private static final Set<String> PLAYER_ACTIONS = Set.of("spawn", "list", "b", "dir", "rename", "tp", "tph");
+    private static final Set<String> PLAYER_ACTIONS = Set.of("spawn", "list", "dir", "rename", "tp", "tph");
     private static final NamespacedKey RENAME_CARD = Objects.requireNonNull(NamespacedKey.fromString("alfakeplayer:rename_card"));
     private static final int MAX_COMPLETIONS = 100;
     static final LegacyComponentSerializer TEXT = LegacyComponentSerializer.legacyAmpersand();
@@ -528,6 +528,11 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
     boolean allowed(Player player, Roster.Entry entry) {
         return player.hasPermission(USE) && entry.key.owner().equals(player.getUniqueId())
             && entry.key.slot() <= slots(player.getUniqueId()) && roster.entries.get(entry.key) == entry;
+    }
+
+    /** 能否使用假人的背包和设置界面：拥有者，或管理员（/afp b <玩家> <编号>）。 */
+    boolean manages(Player player, Roster.Entry entry) {
+        return allowed(player, entry) || player.hasPermission(ADMIN) && roster.entries.get(entry.key) == entry;
     }
 
     // ══ 召唤 ══════════════════════════════════════════════
@@ -1291,6 +1296,7 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
             case "delete" -> { deleteCommand(sender, admin, args); return true; }
             case "grant", "set" -> { grantCommand(sender, admin, action.equals("set"), args); return true; }
             case "card" -> { giveRenameCards(sender, args); return true; }
+            case "b" -> { inventoryCommand(sender, admin, args); return true; }
             case "items" -> {
                 if (!admin) msg(sender, "no_permission");
                 else if (sender instanceof Player player) rosterMenus.openPurchaseItems(player);
@@ -1317,14 +1323,6 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
         switch (action) {
             case "spawn" -> spawnCommand(player, args);
             case "list" -> listCommand(player);
-            case "b" -> {
-                int slot = args.length == 2 ? integer(args[1]) : -1;
-                if (slot < 1) { msg(player, "inventory_help"); break; }
-                if (!unlocked(player, slot)) break;
-                Roster.Entry entry = roster.entries.get(new Roster.Key(player.getUniqueId(), slot));
-                if (entry == null) msg(player, "not_found");
-                else menus.open(player, entry, "inventory");
-            }
             case "dir" -> directionCommand(player, args);
             case "rename" -> {
                 int slot = args.length >= 3 ? integer(args[1]) : -1;
@@ -1335,6 +1333,28 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
             default -> { }
         }
         return true;
+    }
+
+    /** b <编号>：打开自己假人的背包；b <玩家> <编号>：管理员打开任意玩家假人的背包（可编辑，包括超出栏位的假人）。 */
+    private void inventoryCommand(CommandSender sender, boolean admin, String[] args) {
+        if (!(sender instanceof Player player)) { msg(sender, "player_only"); return; }
+        if (args.length == 3) {
+            if (!admin) { msg(player, "no_permission"); return; }
+            int slot = integer(args[2]);
+            if (slot < 1) { msg(player, "inventory_admin_help"); return; }
+            UUID owner = playerId(args[1]);
+            Roster.Entry entry = owner == null ? null : roster.entries.get(new Roster.Key(owner, slot));
+            if (entry == null) msg(player, "inventory_not_found", "player", args[1], "slot", slot);
+            else menus.open(player, entry, "inventory");
+            return;
+        }
+        if (!player.hasPermission(USE)) { msg(player, "no_permission"); return; }
+        int slot = args.length == 2 ? integer(args[1]) : -1;
+        if (slot < 1) { msg(player, admin ? "inventory_admin_help" : "inventory_help"); return; }
+        if (!unlocked(player, slot)) return;
+        Roster.Entry entry = roster.entries.get(new Roster.Key(player.getUniqueId(), slot));
+        if (entry == null) msg(player, "not_found");
+        else menus.open(player, entry, "inventory");
     }
 
     private boolean unlocked(Player player, int slot) {
@@ -1608,13 +1628,28 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
     private UUID owner(String name) {
         Player player = Bukkit.getPlayerExact(name);
         if (player != null && !fake(player)) return player.getUniqueId();
-        var offline = Bukkit.getOfflinePlayerIfCached(name);
-        // 只有指令才会走到这里；遍历离线玩家较慢，不要用于 Tab 补全
-        if (offline == null) offline = Arrays.stream(Bukkit.getOfflinePlayers())
-            .filter(known -> name.equalsIgnoreCase(known.getName())).findFirst().orElse(null);
+        var offline = offlinePlayer(name);
         var id = offline == null ? null : offline.getUniqueId();
         return offline != null && (offline.hasPlayedBefore() || roster.allowances.containsKey(id))
             && !roster.byId.containsKey(id) ? id : null;
+    }
+
+    /** 按名字或 UUID 查找玩家，不要求在本服玩过（跨服时玩家可能只去过其他子服）。 */
+    private UUID playerId(String name) {
+        try { return UUID.fromString(name); }
+        catch (IllegalArgumentException notUuid) { }
+        Player player = Bukkit.getPlayerExact(name);
+        if (player != null) return player.getUniqueId();
+        var offline = offlinePlayer(name);
+        return offline == null ? null : offline.getUniqueId();
+    }
+
+    /** 只有指令才会走到这里；遍历离线玩家较慢，不要用于 Tab 补全。 */
+    private static OfflinePlayer offlinePlayer(String name) {
+        var offline = Bukkit.getOfflinePlayerIfCached(name);
+        if (offline != null) return offline;
+        return Arrays.stream(Bukkit.getOfflinePlayers())
+            .filter(known -> name.equalsIgnoreCase(known.getName())).findFirst().orElse(null);
     }
 
     private static int integer(String value) {
@@ -1647,7 +1682,11 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
                     if (self != null) options.addAll(TIER_NAMES);
                     own.forEach(entry -> options.add(String.valueOf(entry.key.slot())));
                 }
-                case "b", "dir", "rename" -> own.forEach(entry -> options.add(String.valueOf(entry.key.slot())));
+                case "b" -> {
+                    own.forEach(entry -> options.add(String.valueOf(entry.key.slot())));
+                    if (admin && sender instanceof Player) for (Player target : Bukkit.getOnlinePlayers()) if (!fake(target)) options.add(target.getName());
+                }
+                case "dir", "rename" -> own.forEach(entry -> options.add(String.valueOf(entry.key.slot())));
                 case "tp", "tph" -> {
                     if (teleport) for (Roster.Entry entry : own) {
                         if (!running(entry)) continue;
@@ -1687,6 +1726,12 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
                 default -> { }
             }
         } else if (args.length == 3 && self != null && first.equals("spawn")) options.addAll(TIER_NAMES);
+        else if (args.length == 3 && admin && sender instanceof Player && first.equals("b")) {
+            // 只查在线玩家和本服缓存，不遍历离线玩家
+            Player online = Bukkit.getPlayerExact(args[1]);
+            var target = online != null ? online : Bukkit.getOfflinePlayerIfCached(args[1]);
+            if (target != null) roster.owned(target.getUniqueId()).forEach(entry -> options.add(String.valueOf(entry.key.slot())));
+        }
         return options.stream().distinct().filter(value -> value.toLowerCase(Locale.ROOT).startsWith(prefix))
             .sorted().limit(MAX_COMPLETIONS).toList();
     }

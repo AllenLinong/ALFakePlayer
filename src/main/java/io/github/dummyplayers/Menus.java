@@ -135,12 +135,12 @@ final class Menus implements Listener {
      * 假人在其他子服运行或被编辑时以只读方式打开，并定时刷新。
      */
     void open(Player player, Roster.Entry entry, String menu) {
-        if (!plugin.allowed(player, entry)) return;
+        if (!plugin.manages(player, entry)) return;
         if (!menu.equals("inventory") || plugin.roster.holds(entry)) { show(player, entry, menu); return; }
         plugin.roster.acquire(entry, false).whenComplete((claim, error) -> {
             boolean acquired = error == null && claim.status() == Roster.Claim.ACQUIRED;
             if (!player.getScheduler().execute(plugin, () -> {
-                if (!plugin.allowed(player, entry)) { if (acquired) maybeRelease(entry); return; }
+                if (!plugin.manages(player, entry)) { if (acquired) maybeRelease(entry); return; }
                 if (error != null) {
                     plugin.getLogger().log(java.util.logging.Level.WARNING, "Could not open the inventory of " + entry.profile(), error);
                     plugin.msg(player, "storage_error");
@@ -171,7 +171,7 @@ final class Menus implements Listener {
         }
         player.getScheduler().runAtFixedRate(plugin, task -> {
             if (viewers.get(view.viewer) != view) { task.cancel(); return; }
-            if (!plugin.allowed(player, view.entry)) { player.closeInventory(); return; }
+            if (!plugin.manages(player, view.entry)) { player.closeInventory(); return; }
             purge(player);
             boolean local = plugin.editable(view.entry);
             if (local || local != view.local || view.displayedRevision != view.entry.inventoryRevision) refreshItems(view);
@@ -325,9 +325,10 @@ final class Menus implements Listener {
             && EMPTY_SLOT.equals(stack.getItemMeta().getPersistentDataContainer().get(actionKey, PersistentDataType.STRING));
     }
 
+    /** 本服是否有玩家（拥有者或管理员）打开着该假人的界面。 */
     boolean watching(Roster.Entry entry) {
-        View view = viewers.get(entry.key.owner());
-        return view != null && view.entry == entry;
+        for (View view : viewers.values()) if (view.entry == entry) return true;
+        return false;
     }
 
     /** 不忽略已取消的点击：界面里的物品全部由这里处理，其他插件取消点击不应让 Shift 等操作失效。 */
@@ -336,7 +337,7 @@ final class Menus implements Listener {
         if (!(event.getView().getTopInventory().getHolder() instanceof View view)) return;
         int raw = event.getRawSlot();
         if (!(event.getWhoClicked() instanceof Player player) || !view.viewer.equals(player.getUniqueId())
-            || !plugin.allowed(player, view.entry) || event instanceof InventoryCreativeEvent) { event.setCancelled(true); return; }
+            || !plugin.manages(player, view.entry) || event instanceof InventoryCreativeEvent) { event.setCancelled(true); return; }
         boolean simple = event.getClick() == ClickType.LEFT || event.getClick() == ClickType.RIGHT;
         boolean quick = event.getClick() == ClickType.SHIFT_LEFT || event.getClick() == ClickType.SHIFT_RIGHT;
         // 自己背包里的普通点击交给原版处理（被其他插件取消的保持取消）
@@ -373,7 +374,7 @@ final class Menus implements Listener {
         }
         if (action.equals("direction")) {
             if (event.getClick() == ClickType.LEFT) player.getScheduler().execute(plugin, () -> {
-                if (player.getOpenInventory().getTopInventory() == view.inventory && plugin.allowed(player, view.entry)) beginDirection(player, view.entry);
+                if (player.getOpenInventory().getTopInventory() == view.inventory && plugin.manages(player, view.entry)) beginDirection(player, view.entry);
             }, null, 1);
             return;
         }
@@ -381,7 +382,7 @@ final class Menus implements Listener {
             if (event.getClick() == ClickType.LEFT) view.entry.attack = !view.entry.attack;
             else if (event.getClick() == ClickType.RIGHT) {
                 player.getScheduler().execute(plugin, () -> {
-                    if (player.getOpenInventory().getTopInventory() == view.inventory && plugin.allowed(player, view.entry)) beginAttackInput(player, view.entry);
+                    if (player.getOpenInventory().getTopInventory() == view.inventory && plugin.manages(player, view.entry)) beginAttackInput(player, view.entry);
                 }, null, 1);
                 return;
             }
@@ -444,7 +445,7 @@ final class Menus implements Listener {
         catch (NumberFormatException invalid) { ticks = -1; }
         int requested = ticks;
         player.getScheduler().execute(plugin, () -> {
-            if (!plugin.allowed(player, entry)) return;
+            if (!plugin.manages(player, entry)) return;
             if (text.equalsIgnoreCase("cancel") || text.equals("取消")) { open(player, entry, "settings"); return; }
             if (requested < 20 || requested > 200) {
                 attackInputs.put(player.getUniqueId(), entry);
@@ -478,17 +479,17 @@ final class Menus implements Listener {
         event.setCancelled(true);
         float yaw = player.getLocation().getYaw();
         DummyPlayers.Live active = plugin.live.get(entry.id);
-        if ((active == null || active.dead) && plugin.allowed(player, entry) && plugin.forwardDirection(entry, yaw)) {
+        if ((active == null || active.dead) && plugin.manages(player, entry) && plugin.forwardDirection(entry, yaw)) {
             player.getScheduler().execute(plugin, () -> {
                 plugin.msg(player, "direction_set", "slot", entry.key.slot());
-                if (plugin.allowed(player, entry)) open(player, entry, "settings");
+                if (plugin.manages(player, entry)) open(player, entry, "settings");
             }, null, 1);
             return;
         }
-        if (active == null || active.dead || !plugin.allowed(player, entry)) {
+        if (active == null || active.dead || !plugin.manages(player, entry)) {
             player.getScheduler().execute(plugin, () -> {
                 plugin.msg(player, "direction_offline");
-                if (plugin.allowed(player, entry)) open(player, entry, "settings");
+                if (plugin.manages(player, entry)) open(player, entry, "settings");
             }, null, 1);
             return;
         }
@@ -497,13 +498,13 @@ final class Menus implements Listener {
             active.actions.direction(yaw);
             plugin.saveDirection(entry, yaw);
             player.getScheduler().execute(plugin, () -> {
-                if (!plugin.allowed(player, entry)) return;
+                if (!plugin.manages(player, entry)) return;
                 plugin.msg(player, "direction_set", "slot", entry.key.slot());
                 open(player, entry, "settings");
             }, null, 1);
         }, () -> player.getScheduler().execute(plugin, () -> {
             plugin.msg(player, "direction_offline");
-            if (plugin.allowed(player, entry)) open(player, entry, "settings");
+            if (plugin.manages(player, entry)) open(player, entry, "settings");
         }, null, 1), 1);
         if (!queued) directionInputs.remove(player.getUniqueId(), entry);
     }

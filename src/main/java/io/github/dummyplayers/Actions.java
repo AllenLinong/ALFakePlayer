@@ -195,8 +195,13 @@ final class Actions {
 
     private static boolean canTarget(Entity entity) { return entity.isPickable() && !entity.isSpectator(); }
 
+    /**
+     * 盔甲架可以作为横扫刷怪的靶子：拿剑打盔甲架会横扫周围的怪；两次攻击间隔超过 5 tick 时盔甲架只会晃动，不会被打碎。
+     * 隐形、标记和无敌的盔甲架打不动也不会触发横扫，多为其他插件的全息字或模型，跳过。
+     */
     private static boolean canAttack(Entity entity) {
-        return entity instanceof LivingEntity && !(entity instanceof ArmorStand) && entity.isAlive() && canTarget(entity);
+        if (entity instanceof ArmorStand stand && (stand.isMarker() || stand.isInvisible() || stand.isInvulnerable())) return false;
+        return entity instanceof LivingEntity && entity.isAlive() && canTarget(entity);
     }
 
     private EntityHitResult attackTarget(Vec3 eye, Vec3 look) {
