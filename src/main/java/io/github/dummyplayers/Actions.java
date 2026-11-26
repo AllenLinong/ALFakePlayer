@@ -130,7 +130,8 @@ final class Actions {
         Block plant = plantBlock();
         HitResult block = !use ? null : plant != null ? plantTarget(plant) : dummy.pick(blockReach, 1.0F, false);
         EntityHitResult entity = entry.attack ? attackTarget(eye, look) : null;
-        if (entity == null && use) {
+        // 放置方块时视线上有实体就不放（会点到实体）；种植是往地上种，不受前方实体影响
+        if (entity == null && use && plant == null) {
             double max = Math.min(entityReach * entityReach, block.getType() == HitResult.Type.MISS
                 ? Double.POSITIVE_INFINITY : eye.distanceToSqr(block.getLocation()));
             Vec3 step = look.scale(entityReach);
@@ -238,8 +239,8 @@ final class Actions {
         }
         bite = false;
         if (tick < nextCast) return;
-        Vec3 water = waterAhead();
-        Float aim = water == null ? null : aimPitch(water);
+        Water water = waterAhead();
+        Float aim = water == null ? null : castPitch(water);
         if (aim == null) { castFailures++; nextCast = tick + retryDelay(); return; }
         // 浮漂按抛竿时的视角飞出，先低头对准水面
         pitch = aim;
@@ -260,73 +261,146 @@ final class Actions {
         }
     }
 
+    /** 往前最多查看这么远找水和水的尽头。 */
+    private static final double SCAN = 16.0;
+    /** 浮漂宽 0.25 格：中心离岸至少这么远才不会碰到岸边。 */
+    private static final double BOBBER = 0.15;
+
     /**
-     * 沿假人的水平朝向往前 1–12 格找最近的水面（脚下高度往上 1 格、往下 4 格），
-     * 返回这格水面上沿射线的中点；没有时为 null。
+     * 正前方第一片水：沿朝向进入和离开的水平距离，水面方块的高度、水面高度和水深（格）；
+     * wall 表示这片水的尽头是高出水面的方块（对岸），浮漂漂到那里会被挡住，仍留在水里。
      */
-    private Vec3 waterAhead() {
+    private record Water(double enter, double exit, int surfaceY, double top, int depth, boolean wall) { }
+
+    /** 沿假人的水平朝向找正前方的第一片露天水面（脚下高度往上 1 格、往下 4 格），一直看到这片水的尽头；没有时为 null。 */
+    private Water waterAhead() {
         var level = dummy.level();
         double radians = Math.toRadians(yaw);
         double dx = -Math.sin(radians), dz = Math.cos(radians);
-        int feet = dummy.getBlockY();
-        BlockPos column = null, surface = null;
-        double enter = 0;
-        for (double distance = 0.6; distance <= 12.5; distance += 0.05) {
-            double x = dummy.getX() + dx * distance, z = dummy.getZ() + dz * distance;
-            BlockPos here = BlockPos.containing(x, feet, z);
-            if (here.getX() == (column == null ? Integer.MIN_VALUE : column.getX()) && here.getZ() == column.getZ()) continue;
-            if (surface != null) {
-                double middle = (enter + distance) / 2;
-                double height = level.getFluidState(surface).getHeight(level, surface);
-                return new Vec3(dummy.getX() + dx * middle, surface.getY() + height, dummy.getZ() + dz * middle);
-            }
-            column = here;
-            if (!ownedAndLoaded(here)) return null;
-            for (int dy = 1; dy >= -4; dy--) {
-                BlockPos position = here.above(dy);
-                if (!level.getFluidState(position).is(FluidTags.WATER)) {
+        int feet = feet().getY();
+        int surfaceY = 0, depth = 0, lastX = Integer.MIN_VALUE, lastZ = Integer.MIN_VALUE;
+        double enter = -1, exit = -1, reached = 0, top = 0;
+        boolean wall = false;
+        for (double distance = 0.6; distance <= SCAN; distance += 0.05) {
+            int x = (int) Math.floor(dummy.getX() + dx * distance), z = (int) Math.floor(dummy.getZ() + dz * distance);
+            if (x == lastX && z == lastZ) { reached = distance; continue; }
+            lastX = x;
+            lastZ = z;
+            BlockPos column = new BlockPos(x, feet, z);
+            if (!ownedAndLoaded(column)) break;
+            reached = distance;
+            if (enter < 0) {
+                for (int dy = 1; dy >= -4; dy--) {
+                    BlockPos position = column.above(dy);
+                    if (level.getFluidState(position).is(FluidTags.WATER)) {
+                        surfaceY = position.getY();
+                        top = surfaceY + level.getFluidState(position).getHeight(level, position);
+                        while (depth < 8 && level.getFluidState(position.below(depth)).is(FluidTags.WATER)) depth++;
+                        enter = distance;
+                        break;
+                    }
                     // 水面以上被方块挡住的格子不算
                     if (!level.getBlockState(position).getCollisionShape(level, position).isEmpty()) break;
-                    continue;
                 }
-                surface = position;
-                enter = distance;
-                break;
+            } else {
+                // 同一高度还是露天的水面就继续，否则这片水到此为止
+                BlockPos position = new BlockPos(x, surfaceY, z), above = position.above();
+                if (!level.getFluidState(position).is(FluidTags.WATER) || level.getFluidState(above).is(FluidTags.WATER)
+                    || !level.getBlockState(above).getCollisionShape(level, above).isEmpty()) {
+                    var shape = level.getBlockState(position).getCollisionShape(level, position);
+                    wall = !level.getFluidState(position).is(FluidTags.WATER) && !shape.isEmpty()
+                        && surfaceY + shape.max(Direction.Axis.Y) > top;
+                    exit = distance;
+                    break;
+                }
             }
+        }
+        if (enter < 0) return null;
+        return new Water(enter, exit < 0 ? reached : exit, surfaceY, top, depth, wall);
+    }
+
+    /**
+     * 选抛竿角度：尽量平视。从 0° 开始按 0.5° 一档往下、往上交替尝试，取第一个能让浮漂停在这片水里
+     * （离近岸至少半格；远处没有对岸挡着时离尽头也要半格）、飞行途中不撞方块的角度。
+     * 大片水面平着抛就能落进去；离得很近时才低头。都不行时为 null。
+     */
+    private Float castPitch(Water water) {
+        double margin = Math.min(0.5, (water.exit() - water.enter()) / 2 - 0.05);
+        if (margin <= 0) return null;
+        double low = water.enter() + margin, high = water.exit() - (water.wall() ? BOBBER : margin);
+        // 往下最多 85°（水就在面前时要低头很多），往上最多 30°
+        for (int step = 0; step <= 170; step++) {
+            float down = step * 0.5f;
+            Double rest = restDistance(down, water);
+            if (rest != null && rest >= low && rest <= high) return down;
+            if (step == 0 || down > 30) continue;
+            rest = restDistance(-down, water);
+            if (rest != null && rest >= low && rest <= high) return -down;
         }
         return null;
     }
 
     /**
-     * 按原版浮漂的抛出速度和运动规律（每 tick 先加 -0.03 重力，移动后速度乘 0.92），
-     * 找出让浮漂落到目标水面的低头角度；够不着时为 null。多个角度都能落到时选向下抛、飞行时间短的。
+     * 按原版浮漂的运动规律模拟这个角度抛出后停下的水平距离（从假人算起）：抛出速度 0.6/长度 + 0.5，
+     * 每 tick 先加 -0.03 重力、移动、速度乘 0.92；入水后减速转为浮动并往前漂一段，入水那一步碰到水底时就停在那里。
+     * 途中撞到方块、落到岸上或飞过这片水时为 null。
      */
-    private Float aimPitch(Vec3 target) {
-        double eyeY = dummy.getEyeY();
-        double distance = Math.hypot(target.x - dummy.getX(), target.z - dummy.getZ()) - 0.3;
-        double drop = eyeY - target.y;
-        Float best = null;
-        double bestError = 0.4;
-        for (int angle = 85; angle >= -30; angle--) {
-            double vertical = Math.clamp(-Math.tan(Math.toRadians(angle)), -5, 5);
-            double speed = 0.6 / Math.sqrt(1 + vertical * vertical) + 0.5;
-            double vx = speed, vy = vertical * speed, x = 0, y = 0;
-            for (int step = 0; step < 200; step++) {
-                vy -= 0.03;
-                double nextX = x + vx, nextY = y + vy;
-                if (nextY <= -drop) {
-                    double landed = x + (nextX - x) * (y + drop) / (y - nextY);
-                    double error = Math.abs(landed - distance);
-                    if (error < bestError) { bestError = error; best = (float) angle; }
-                    break;
-                }
-                x = nextX;
-                y = nextY;
-                vx *= 0.92;
-                vy *= 0.92;
+    private Double restDistance(float angle, Water water) {
+        // 水面比视线高（水在脚上方一格）时，浮漂一出手就在水里，按略低于视线算
+        double eyeY = dummy.getEyeY(), surface = Math.min(water.top() - eyeY, -0.01), bottom = water.surfaceY() - water.depth() + 1 - eyeY;
+        double vertical = Math.clamp(-Math.tan(Math.toRadians(angle)), -5, 5);
+        double speed = 0.6 / Math.sqrt(1 + vertical * vertical) + 0.5;
+        double vx = speed, vy = vertical * speed, x = 0.3, y = 0;
+        for (int step = 0; step < 200; step++) {
+            // 浮漂只会往前飞：还没落到水面就已经过了这片水，不用再算
+            if (x > water.exit()) return null;
+            vy -= 0.03;
+            double nextX = x + vx, nextY = y + vy;
+            if (nextY <= surface) {
+                // 落到水面高度的位置必须在这片水上：在它前面是打在岸上（浮漂有宽度，离岸留一点），在它后面是飞过了头
+                double entry = x + (nextX - x) * (y - surface) / (y - nextY);
+                if (entry < water.enter() + BOBBER || entry > water.exit() || !clear(x, y, entry, surface)) return null;
+                double rest = nextY <= bottom ? x + (nextX - x) * (y - bottom) / (y - nextY)
+                    : nextX + vx * 0.92 * 0.3 * 0.9 / (1 - 0.9 * 0.92);
+                // 对岸挡着时浮漂漂到岸边就停住
+                return water.wall() ? Math.min(rest, water.exit() - BOBBER) : rest;
             }
+            if (!clear(x, y, nextX, nextY)) return null;
+            x = nextX;
+            y = nextY;
+            vx *= 0.92;
+            vy *= 0.92;
         }
-        return best;
+        return null;
+    }
+
+    /**
+     * 浮漂从 (x0, y0) 直线飞到 (x1, y1) 的途中不撞方块（x 是沿朝向离假人的水平距离，y 是相对视线的高度）。
+     * 每 0.25 格检查一次，免得浮漂一 tick 飞一格多时穿过岸边的栅栏、墙。
+     */
+    private boolean clear(double x0, double y0, double x1, double y1) {
+        double radians = Math.toRadians(yaw);
+        double dx = -Math.sin(radians), dz = Math.cos(radians), eyeY = dummy.getEyeY();
+        int samples = Math.max(1, (int) Math.ceil(Math.hypot(x1 - x0, y1 - y0) / 0.25));
+        for (int i = 1; i <= samples; i++) {
+            double t = (double) i / samples, along = x0 + (x1 - x0) * t;
+            Vec3 point = new Vec3(dummy.getX() + dx * along, eyeY + y0 + (y1 - y0) * t, dummy.getZ() + dz * along);
+            BlockPos at = BlockPos.containing(point);
+            if (!ownedAndLoaded(at)) return false;
+            // 栅栏、墙的碰撞箱有 1.5 格高，会伸到上面一格，所以连下面一格一起看
+            if (hits(at, point) || hits(at.below(), point)) return false;
+        }
+        return true;
+    }
+
+    /** 浮漂（碰撞箱宽 0.25、高 0.25，坐标在底面中心）在 point 时会不会碰到这格方块。 */
+    private boolean hits(BlockPos at, Vec3 point) {
+        var level = dummy.level();
+        var shape = level.getBlockState(at).getCollisionShape(level, at);
+        if (shape.isEmpty()) return false;
+        AABB box = shape.bounds().move(at);
+        return point.x > box.minX - 0.125 && point.x < box.maxX + 0.125 && point.z > box.minZ - 0.125 && point.z < box.maxZ + 0.125
+            && point.y > box.minY - 0.25 && point.y < box.maxY;
     }
 
     // ── 种植 ──────────────────────────────────────────────
@@ -366,7 +440,7 @@ final class Actions {
     private BlockHitResult plantTarget(Block plant) {
         var level = dummy.level();
         Direction forward = Direction.fromYRot(yaw);
-        BlockPos front = dummy.blockPosition().relative(forward);
+        BlockPos front = feet().relative(forward);
         BlockState planted = plant.defaultBlockState();
         for (BlockPos ground : List.of(front, front.below())) {
             BlockPos spot = ground.above();
@@ -441,7 +515,7 @@ final class Actions {
     /** plant 不为 null 时正在自动种植：正前方一格的植物和土类地面不挖。 */
     private BlockHitResult miningTarget(Vec3 eye, double reach, int minimumDurability, Block plant) {
         Direction forward = Direction.fromYRot(yaw);
-        BlockPos origin = dummy.blockPosition();
+        BlockPos origin = feet();
         double eyeOffset = (eye.x - origin.getX() - 0.5) * forward.getStepX()
             + (eye.z - origin.getZ() - 0.5) * forward.getStepZ();
         int lastColumn = (int) Math.floor(reach + eyeOffset + 0.5);
@@ -471,6 +545,14 @@ final class Actions {
             }
         }
         return null;
+    }
+
+    /**
+     * 假人脚所在的方块。站在耕地、灵魂沙、泥巴、土径等接近一格高的方块上时是它上面那格（blockPosition 会算成脚下的方块本身）；
+     * 台阶、地毯等不到 0.6 格高的仍按原来的算。
+     */
+    private BlockPos feet() {
+        return BlockPos.containing(dummy.getX(), dummy.getY() + 0.4, dummy.getZ());
     }
 
     private boolean ownedAndLoaded(BlockPos position) {
