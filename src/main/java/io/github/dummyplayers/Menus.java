@@ -3,6 +3,9 @@ package io.github.dummyplayers;
 import io.papermc.paper.datacomponent.DataComponentTypes;
 import io.papermc.paper.event.player.AsyncChatEvent;
 import net.kyori.adventure.text.Component;
+import net.kyori.adventure.text.event.ClickCallback;
+import net.kyori.adventure.text.event.ClickEvent;
+import net.kyori.adventure.text.event.HoverEvent;
 import net.kyori.adventure.text.format.TextDecoration;
 import net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer;
 import net.minecraft.world.item.BlockItem;
@@ -18,6 +21,7 @@ import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.inventory.*;
 import org.bukkit.persistence.PersistentDataType;
 
+import java.time.Duration;
 import java.util.*;
 
 final class Menus implements Listener {
@@ -31,8 +35,17 @@ final class Menus implements Listener {
     private final DummyPlayers plugin;
     private volatile Map<String, Layout> layouts;
     private final Map<UUID, View> viewers = new java.util.concurrent.ConcurrentHashMap<>();
-    private final Map<UUID, Roster.Entry> directionInputs = new java.util.concurrent.ConcurrentHashMap<>();
-    private final Map<UUID, Roster.Entry> attackInputs = new java.util.concurrent.ConcurrentHashMap<>();
+    /**
+     * 等待玩家输入：攻击间隔在聊天输入数字，工作方向对空气挥手。60 秒内有效，可点击提示里的 [取消]。
+     * token 区分同一玩家先后发起的输入，过期任务只清除自己那一次。
+     */
+    private record Pending(Roster.Entry entry, long token, long expires) {
+        boolean expired() { return System.currentTimeMillis() >= expires; }
+    }
+    private static final int INPUT_SECONDS = 60;
+    private final java.util.concurrent.atomic.AtomicLong inputTokens = new java.util.concurrent.atomic.AtomicLong();
+    private final Map<UUID, Pending> directionInputs = new java.util.concurrent.ConcurrentHashMap<>();
+    private final Map<UUID, Pending> attackInputs = new java.util.concurrent.ConcurrentHashMap<>();
     private final NamespacedKey actionKey, objectKey, copyKey;
     private volatile String enabled, disabled, notSet, autoTool;
 
@@ -106,7 +119,7 @@ final class Menus implements Listener {
                 try { look = MenuItem.read(item); }
                 catch (IllegalArgumentException invalid) { throw bad(name, "'" + token + "': " + invalid.getMessage()); }
                 String action = item.getString("action", "");
-                if (!Set.of("", "open_gui:inventory", "open_gui:settings", "toggle:mine", "toggle:attack", "toggle:use", "toggle:unload", "toggle:pushable", "toggle:sneak", "select:placement", "direction", "close").contains(action)) {
+                if (!Set.of("", "open_gui:inventory", "open_gui:settings", "toggle:mine", "toggle:attack", "toggle:use", "toggle:unload", "toggle:pushable", "toggle:sneak", "toggle:fish", "select:placement", "direction", "close").contains(action)) {
                     throw bad(name, "unknown action for '" + token + "': " + action);
                 }
                 buttons.put(slot, new Button(look, item.getString("name", " "), item.getStringList("lore"), action));
@@ -233,6 +246,7 @@ final class Menus implements Listener {
             case "toggle:unload" -> plugin.unloadChests && entry.autoUnload;
             case "toggle:pushable" -> entry.pushable;
             case "toggle:sneak" -> entry.sneaking;
+            case "toggle:fish" -> entry.fishing;
             default -> false;
         };
         return DummyPlayers.TEXT.deserialize(source.replace("%state%", on ? enabled : disabled)
@@ -394,7 +408,8 @@ final class Menus implements Listener {
                 Material selected = null;
                 if (event.getClick() == ClickType.LEFT) {
                     ItemStack sample = event.getCursor();
-                    if (sample == null || !sample.getType().isBlock() || !(CraftMagicNumbers.getItem(sample.getType()) instanceof BlockItem)) {
+                    // 方块，或种子、胡萝卜等能种下的物品（它们也是放置方块的物品）
+                    if (sample == null || sample.isEmpty() || !(CraftMagicNumbers.getItem(sample.getType()) instanceof BlockItem)) {
                         plugin.msg(player, "placement_sample");
                         return;
                     }
@@ -421,6 +436,10 @@ final class Menus implements Listener {
                 if (event.getClick() != ClickType.LEFT) return;
                 view.entry.sneaking = !view.entry.sneaking;
             }
+            case "toggle:fish" -> {
+                if (event.getClick() != ClickType.LEFT) return;
+                view.entry.fishing = !view.entry.fishing;
+            }
             default -> { return; }
         }
         plugin.settingsChanged(view.entry);
@@ -428,17 +447,58 @@ final class Menus implements Listener {
     }
 
     private void beginAttackInput(Player player, Roster.Entry entry) {
-        attackInputs.put(player.getUniqueId(), entry);
         player.closeInventory();
-        plugin.msg(player, "attack_interval_input", "ticks", entry.attackIntervalTicks);
+        awaitInput(player, attackInputs, entry, "attack_interval_input", "ticks", entry.attackIntervalTicks, "seconds", INPUT_SECONDS);
     }
 
-    @EventHandler(priority = EventPriority.HIGHEST)
+    /** 开始等待输入（同一玩家同时只等一项，新的替换旧的），发送带 [取消] 的提示，到期后自动取消。 */
+    private void awaitInput(Player player, Map<UUID, Pending> inputs, Roster.Entry entry, String key, Object... values) {
+        UUID id = player.getUniqueId();
+        directionInputs.remove(id);
+        attackInputs.remove(id);
+        Pending pending = new Pending(entry, inputTokens.incrementAndGet(), System.currentTimeMillis() + INPUT_SECONDS * 1000L);
+        inputs.put(id, pending);
+        prompt(player, inputs, pending, key, values);
+        player.getScheduler().runDelayed(plugin, task -> {
+            if (inputs.remove(id, pending)) plugin.msg(player, "input_expired", "seconds", INPUT_SECONDS);
+        }, null, INPUT_SECONDS * 20L);
+    }
+
+    /** 发送提示并附上可点击的 [取消]：点击后取消这次输入，回到行为设置。 */
+    private void prompt(Player player, Map<UUID, Pending> inputs, Pending pending, String key, Object... values) {
+        UUID id = player.getUniqueId();
+        long lifetime = Math.max(1, pending.expires() - System.currentTimeMillis());
+        Component cancel = plugin.messageText("input_cancel")
+            .hoverEvent(HoverEvent.showText(plugin.messageText("input_cancel_hover")))
+            .clickEvent(ClickEvent.callback(audience -> player.getScheduler().execute(plugin, () -> cancelInput(player, inputs, pending), null, 1),
+                ClickCallback.Options.builder().uses(1).lifetime(Duration.ofMillis(lifetime)).build()));
+        player.sendMessage(plugin.message(key, values).append(Component.space()).append(cancel));
+    }
+
+    private void cancelInput(Player player, Map<UUID, Pending> inputs, Pending pending) {
+        if (!inputs.remove(player.getUniqueId(), pending)) return;
+        plugin.msg(player, "input_cancelled");
+        if (plugin.manages(player, pending.entry())) open(player, pending.entry(), "settings");
+    }
+
+    /**
+     * 旧版聊天事件（不少聊天插件用它处理聊天）：等待输入时在最早的优先级取消，
+     * 聊天插件就不会把输入的内容发出去。Paper 会把取消状态带到随后的 AsyncChatEvent。
+     */
+    @SuppressWarnings("deprecation")
+    @EventHandler(priority = EventPriority.LOWEST)
+    public void onLegacyChat(org.bukkit.event.player.AsyncPlayerChatEvent event) {
+        if (attackInputs.containsKey(event.getPlayer().getUniqueId())) event.setCancelled(true);
+    }
+
+    /** 读取攻击间隔输入。在最早的优先级取消聊天，输入的内容（包括「取消」）不会发到聊天里。 */
+    @EventHandler(priority = EventPriority.LOWEST)
     public void onChat(AsyncChatEvent event) {
         Player player = event.getPlayer();
-        Roster.Entry entry = attackInputs.remove(player.getUniqueId());
-        if (entry == null) return;
+        Pending pending = attackInputs.remove(player.getUniqueId());
+        if (pending == null) return;
         event.setCancelled(true);
+        Roster.Entry entry = pending.entry();
         String text = PlainTextComponentSerializer.plainText().serialize(event.message()).strip();
         int ticks;
         try { ticks = Integer.parseInt(text); }
@@ -446,10 +506,15 @@ final class Menus implements Listener {
         int requested = ticks;
         player.getScheduler().execute(plugin, () -> {
             if (!plugin.manages(player, entry)) return;
-            if (text.equalsIgnoreCase("cancel") || text.equals("取消")) { open(player, entry, "settings"); return; }
+            if (text.equalsIgnoreCase("cancel") || text.equals("取消")) {
+                attackInputs.put(player.getUniqueId(), pending);
+                cancelInput(player, attackInputs, pending);
+                return;
+            }
             if (requested < 20 || requested > 200) {
-                attackInputs.put(player.getUniqueId(), entry);
-                plugin.msg(player, "attack_interval_invalid");
+                if (pending.expired()) { plugin.msg(player, "input_expired", "seconds", INPUT_SECONDS); return; }
+                attackInputs.put(player.getUniqueId(), pending);
+                prompt(player, attackInputs, pending, "attack_interval_invalid");
                 return;
             }
             entry.attackIntervalTicks = requested;
@@ -465,17 +530,17 @@ final class Menus implements Listener {
             plugin.msg(player, "direction_offline");
             return;
         }
-        directionInputs.put(player.getUniqueId(), entry);
         player.closeInventory();
-        plugin.msg(player, "direction_capture");
+        awaitInput(player, directionInputs, entry, "direction_capture", "seconds", INPUT_SECONDS);
     }
 
     @EventHandler(priority = EventPriority.HIGHEST)
     public void onAnimation(PlayerAnimationEvent event) {
         if (event.getAnimationType() != org.bukkit.event.player.PlayerAnimationType.ARM_SWING) return;
         Player player = event.getPlayer();
-        Roster.Entry entry = directionInputs.remove(player.getUniqueId());
-        if (entry == null) return;
+        Pending pending = directionInputs.remove(player.getUniqueId());
+        if (pending == null) return;
+        Roster.Entry entry = pending.entry();
         event.setCancelled(true);
         float yaw = player.getLocation().getYaw();
         DummyPlayers.Live active = plugin.live.get(entry.id);
@@ -506,7 +571,7 @@ final class Menus implements Listener {
             plugin.msg(player, "direction_offline");
             if (plugin.manages(player, entry)) open(player, entry, "settings");
         }, null, 1), 1);
-        if (!queued) directionInputs.remove(player.getUniqueId(), entry);
+        if (!queued) directionInputs.remove(player.getUniqueId(), pending);
     }
 
     @EventHandler

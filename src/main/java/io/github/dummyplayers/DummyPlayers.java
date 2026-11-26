@@ -33,6 +33,7 @@ import org.bukkit.event.entity.EntityPotionEffectEvent;
 import org.bukkit.event.entity.EntityPickupItemEvent;
 import org.bukkit.event.entity.EntityTargetEvent;
 import org.bukkit.event.entity.PlayerDeathEvent;
+import org.bukkit.event.player.PlayerFishEvent;
 import org.bukkit.event.player.PlayerJoinEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.event.server.PluginDisableEvent;
@@ -499,7 +500,10 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
 
     // ══ 消息 ══════════════════════════════════════════════
 
-    void msg(CommandSender sender, String key, Object... pairs) {
+    void msg(CommandSender sender, String key, Object... pairs) { sender.sendMessage(message(key, pairs)); }
+
+    /** 带前缀的消息，%名称% 按 pairs（名称, 值, 名称, 值…）替换。 */
+    Component message(String key, Object... pairs) {
         String value = messages.getString(key, key);
         Component rendered = TEXT.deserialize(messages.getString("prefix", "") + value);
         for (int index = 0; index + 1 < pairs.length; index += 2) {
@@ -507,8 +511,11 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
             Component text = Component.text(String.valueOf(pairs[index + 1]));
             rendered = rendered.replaceText(builder -> builder.matchLiteral(token).replacement(text));
         }
-        sender.sendMessage(rendered);
+        return rendered;
     }
+
+    /** 不带前缀的消息文字，用于按钮等。 */
+    Component messageText(String key) { return TEXT.deserialize(messages.getString(key, key)); }
 
     /** 回到发送者所在线程执行（玩家用实体调度器，后台用全局调度器）。 */
     private void tell(CommandSender sender, Runnable action) {
@@ -938,6 +945,7 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
         body.addProperty("unload", entry.autoUnload);
         body.addProperty("pushable", entry.pushable);
         body.addProperty("sneak", entry.sneaking);
+        body.addProperty("fish", entry.fishing);
         body.addProperty("interval", entry.attackIntervalTicks);
         body.addProperty("placement", entry.placementBlock == null ? "" : entry.placementBlock.getKey().toString());
         if (yaw != null) body.addProperty("yaw", yaw);
@@ -1104,6 +1112,7 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
         entry.autoUnload = body.get("unload").getAsBoolean();
         entry.pushable = body.get("pushable").getAsBoolean();
         entry.sneaking = body.get("sneak").getAsBoolean();
+        entry.fishing = body.has("fish") && body.get("fish").getAsBoolean();
         entry.attackIntervalTicks = Math.clamp(body.get("interval").getAsInt(), 20, 200);
         String placement = body.get("placement").getAsString();
         entry.placementBlock = placement.isEmpty() ? null : Material.matchMaterial(placement);
@@ -1199,6 +1208,21 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
         event.getEntity().getScheduler().execute(this, () -> {
             if (live.get(active.entry.id) == active) unlink(active, true);
         }, null, 1);
+    }
+
+    /**
+     * 自动钓鱼：鱼咬钩时通知假人下一 tick 收竿。
+     * 原版把钓到的东西从浮漂朝玩家抛过来，浮漂离得远、和玩家高度差小时会掉回水里；
+     * 假人钓到的东西直接放到它脚下（此时还没加入世界），下一 tick 就能捡起。
+     */
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void onFish(PlayerFishEvent event) {
+        Live active = live.get(event.getPlayer().getUniqueId());
+        if (active == null) return;
+        if (event.getState() == PlayerFishEvent.State.BITE) active.actions.bite();
+        else if (event.getState() == PlayerFishEvent.State.CAUGHT_FISH && event.getCaught() instanceof CraftItem item) {
+            item.getHandle().setPos(active.dummy.getX(), active.dummy.getY(), active.dummy.getZ());
+        }
     }
 
     /** 领地插件在本插件之后启用、或被单独重载时，重新登记它的类加载器。 */

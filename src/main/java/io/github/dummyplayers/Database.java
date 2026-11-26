@@ -237,8 +237,14 @@ final class Database implements AutoCloseable {
                 + " attack TINYINT NOT NULL DEFAULT 0, use_item TINYINT NOT NULL DEFAULT 0,"
                 + " auto_unload TINYINT NOT NULL DEFAULT 1, pushable TINYINT NOT NULL DEFAULT 1,"
                 + " sneaking TINYINT NOT NULL DEFAULT 0, attack_interval_ticks INT NOT NULL DEFAULT 20,"
-                + " placement_block VARCHAR(128) NULL, work_yaw DOUBLE NULL, updated_at BIGINT NOT NULL DEFAULT 0,"
+                + " placement_block VARCHAR(128) NULL, work_yaw DOUBLE NULL, fishing TINYINT NOT NULL DEFAULT 0,"
+                + " updated_at BIGINT NOT NULL DEFAULT 0,"
                 + " UNIQUE (owner, slot))" + engine);
+            // 1.0.2 新增自动钓鱼开关；几个子服同时启动时，加列失败再确认一次是否已被别的子服加上
+            if (!hasColumn(connection, table("dummies"), "fishing")) {
+                try { execute(connection, "ALTER TABLE " + table("dummies") + " ADD COLUMN fishing TINYINT NOT NULL DEFAULT 0"); }
+                catch (SQLException error) { if (!hasColumn(connection, table("dummies"), "fishing")) throw error; }
+            }
             execute(connection, "CREATE TABLE IF NOT EXISTS " + table("inventory") + " ("
                 + "dummy_id VARCHAR(36) NOT NULL, slot INT NOT NULL, item " + (mysql() ? "MEDIUMBLOB" : "BLOB") + " NOT NULL,"
                 + " PRIMARY KEY (dummy_id, slot),"

@@ -25,7 +25,7 @@ config_version: 1
 #
 # action：toggle:mine 挖掘 / toggle:attack 攻击（右键输入间隔，Shift+左/右键调整）
 #         toggle:use 放置 / toggle:unload 搬运货物 / toggle:pushable 允许被推动
-#         toggle:sneak 保持蹲姿 / direction 设置工作方向 / select:placement 设置放置方块
+#         toggle:sneak 保持蹲姿 / toggle:fish 自动钓鱼 / direction 设置工作方向 / select:placement 设置放置方块
 #         open_gui:inventory 返回背包 / close 关闭菜单
 # 占位符：%state% 开关状态、%attack_interval% 攻击间隔、%placement_block% 放置方块、%name% 假人名字
 settings:
@@ -33,7 +33,7 @@ settings:
   shape:
     - "#########"
     - "#M#A#U#C#"
-    - "##P#D#S##"
+    - "#P#D#S#F#"
     - "R########"
   items:
     M:
@@ -72,6 +72,9 @@ settings:
         - "&a▸&7状态：%state%"
         - "&a▸&7当前方块：&f%placement_block%"
         - "&a▸&7在背包第五行设定放置方块"
+        - "&a▸&7设定树苗、种子等植物时改为种植："
+        - "&a  &7种在正前方一格，地面与脚下平齐或高一格"
+        - "&a  &7作物要耕地；植物可放主手、副手或背包"
         - ""
         - "&6▶ &8操作"
         - "&7•&a鼠标左键&a➤&f开启或关闭"
@@ -121,6 +124,19 @@ settings:
         - "&6▶ &8操作"
         - "&7•&a鼠标左键&a➤&f开启或关闭"
       action: "toggle:sneak"
+    F:
+      type: FISHING_ROD
+      name: "&3&l自动钓鱼"
+      lore:
+        - "&6▶ &8钓鱼设置"
+        - "&a▸&7状态：%state%"
+        - "&a▸&7开启后主手换上背包里的鱼竿"
+        - "&a▸&7自动对准正前方最近的水面抛竿，咬钩就收竿"
+        - "&a▸&7钓鱼时不挖掘、攻击和放置"
+        - ""
+        - "&6▶ &8操作"
+        - "&7•&a鼠标左键&a➤&f开启或关闭"
+      action: "toggle:fish"
     R:
       type: ARROW
       name: "&a&l返回背包"

@@ -40,7 +40,7 @@ final class Roster {
         long savedInventoryRevision;
         volatile String alias = "";
         volatile boolean mine, attack, use, autoUnload = true;
-        volatile boolean pushable = true, sneaking;
+        volatile boolean pushable = true, sneaking, fishing;
         volatile int attackIntervalTicks = 20;
         volatile float workYaw;
         volatile boolean directionSet;
@@ -80,14 +80,14 @@ final class Roster {
 
     private record Row(UUID id, Key key, String alias, DummyTier tier, WorkTool tool, boolean mine, boolean attack,
                        boolean use, boolean autoUnload, boolean pushable, boolean sneaking, int attackInterval,
-                       Material placement, Float workYaw) { }
+                       Material placement, Float workYaw, boolean fishing) { }
     private record Snapshot(Entry entry, String alias, DummyTier tier, WorkTool tool, boolean mine, boolean attack,
                             boolean use, boolean autoUnload, boolean pushable, boolean sneaking, int attackInterval,
-                            Material placement, Float workYaw, ItemStack[] items, long revision) { }
+                            Material placement, Float workYaw, boolean fishing, ItemStack[] items, long revision) { }
     private record Outcome(Set<UUID> missing, Set<UUID> lost) { }
 
     private static final String COLUMNS = "id, owner, slot, alias, tier, tool, mine, attack, use_item, auto_unload,"
-        + " pushable, sneaking, attack_interval_ticks, placement_block, work_yaw";
+        + " pushable, sneaking, attack_interval_ticks, placement_block, work_yaw, fishing";
 
     final Map<Key, Entry> entries = new ConcurrentHashMap<>();
     final Map<UUID, Entry> byId = new ConcurrentHashMap<>();
@@ -205,7 +205,7 @@ final class Roster {
                         rows.getBoolean(7), rows.getBoolean(8), rows.getBoolean(9), rows.getBoolean(10),
                         rows.getBoolean(11), rows.getBoolean(12), Math.clamp(rows.getInt(13), 20, 200),
                         placement == null ? null : Material.matchMaterial(placement),
-                        yaw instanceof Number number ? number.floatValue() : null));
+                        yaw instanceof Number number ? number.floatValue() : null, rows.getBoolean(16)));
                 }
             }
         }
@@ -245,6 +245,7 @@ final class Roster {
         entry.autoUnload = row.autoUnload;
         entry.pushable = row.pushable;
         entry.sneaking = row.sneaking;
+        entry.fishing = row.fishing;
         entry.attackIntervalTicks = row.attackInterval;
         entry.placementBlock = row.placement;
         if (row.workYaw != null) entry.workYaw = row.workYaw;
@@ -509,7 +510,7 @@ final class Roster {
         boolean inventoryChanged = entry.inventoryRevision != entry.savedInventoryRevision;
         return new Snapshot(entry, entry.alias, entry.tier, entry.tool, entry.mine, entry.attack, entry.use,
             entry.autoUnload, entry.pushable, entry.sneaking, entry.attackIntervalTicks, entry.placementBlock,
-            entry.directionSet ? entry.workYaw : null, inventoryChanged ? entry.items.clone() : null, entry.inventoryRevision);
+            entry.directionSet ? entry.workYaw : null, entry.fishing, inventoryChanged ? entry.items.clone() : null, entry.inventoryRevision);
     }
 
     private Outcome write(Connection connection, Map<UUID, Integer> slots, List<Snapshot> writes,
@@ -528,7 +529,7 @@ final class Roster {
         }
         try (PreparedStatement dummy = connection.prepareStatement("UPDATE " + t("dummies") + " SET alias = ?, tier = ?,"
                  + " tool = ?, mine = ?, attack = ?, use_item = ?, auto_unload = ?, pushable = ?, sneaking = ?,"
-                 + " attack_interval_ticks = ?, placement_block = ?, work_yaw = ?, updated_at = " + db.now() + " WHERE id = ?");
+                 + " attack_interval_ticks = ?, placement_block = ?, work_yaw = ?, fishing = ?, updated_at = " + db.now() + " WHERE id = ?");
              PreparedStatement lease = connection.prepareStatement("SELECT server_id FROM " + t("sessions")
                  + " WHERE dummy_id = ?" + db.forUpdate());
              PreparedStatement clearItems = connection.prepareStatement("DELETE FROM " + t("inventory") + " WHERE dummy_id = ?");
@@ -549,7 +550,8 @@ final class Roster {
                 dummy.setString(11, snapshot.placement == null ? null : snapshot.placement.getKey().toString());
                 if (snapshot.workYaw == null) dummy.setNull(12, Types.DOUBLE);
                 else dummy.setDouble(12, snapshot.workYaw);
-                dummy.setString(13, id);
+                dummy.setInt(13, snapshot.fishing ? 1 : 0);
+                dummy.setString(14, id);
                 if (dummy.executeUpdate() == 0) {
                     missing.add(snapshot.entry.id);
                     continue;

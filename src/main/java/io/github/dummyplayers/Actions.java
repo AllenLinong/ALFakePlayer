@@ -4,12 +4,16 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.core.component.DataComponents;
 import net.minecraft.network.protocol.game.*;
+import net.minecraft.tags.BlockTags;
+import net.minecraft.tags.FluidTags;
+import net.minecraft.tags.TagKey;
 import net.minecraft.tags.ItemTags;
 import net.minecraft.world.Difficulty;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.decoration.ArmorStand;
+import net.minecraft.world.entity.projectile.FishingHook;
 import net.minecraft.world.entity.projectile.ProjectileUtil;
 import net.minecraft.world.item.BlockItem;
 import net.minecraft.world.item.ItemStack;
@@ -26,6 +30,7 @@ import org.bukkit.event.Event;
 import org.bukkit.event.block.Action;
 import org.bukkit.event.player.PlayerInteractEvent;
 import org.bukkit.inventory.EquipmentSlot;
+import java.util.List;
 import java.util.Set;
 import java.util.function.Predicate;
 
@@ -43,6 +48,11 @@ final class Actions {
     private int idleInterval, nextUnload, unloadRetry, workRevision;
     private boolean eating;
     private float yaw;
+    /** 钓鱼时低头的角度（对准水面），其他时候假人平视。 */
+    private float pitch;
+    /** 鱼咬钩了（PlayerFishEvent BITE，可能来自浮漂所在区域的线程），下一 tick 收竿。 */
+    private volatile boolean bite;
+    private int nextCast, castTick, nextRodSearch, castFailures, dryTicks;
 
     Actions(NativeDummy dummy, Roster.Entry entry) {
         this.dummy = dummy;
@@ -61,10 +71,14 @@ final class Actions {
     private void wake() {
         idleInterval = nextSearch = nextToolSearch = nextWeaponSearch = nextEat = nextUse = 0;
         unloadRetry = nextUnload = 0;
+        nextCast = nextRodSearch = castFailures = 0;
     }
 
+    void bite() { bite = true; }
+
     private void faceWorkDirection() {
-        if (dummy.getYRot() != yaw || dummy.getXRot() != 0) dummy.setRot(yaw, 0);
+        float pitch = entry.fishing ? this.pitch : 0;
+        if (dummy.getYRot() != yaw || dummy.getXRot() != pitch) dummy.setRot(yaw, pitch);
         if (dummy.yBodyRot != yaw) dummy.setYBodyRot(yaw);
         if (dummy.getYHeadRot() != yaw) dummy.setYHeadRot(yaw);
     }
@@ -95,6 +109,9 @@ final class Actions {
         }
         if (eat(tick, plugin.eatLevel, plugin.foodBlacklist)) { stopMining(); return; }
         if (dummy.isUsingItem()) { stopMining(); return; }
+        // 钓鱼占用主手：开启后只钓鱼（和进食），不挖掘、攻击、放置
+        if (entry.fishing) { stopMining(); fish(tick, plugin.minimumDurability); return; }
+        if (dummy.fishing != null) dummy.fishing.discard();
         boolean attackReady = entry.attack && tick - lastAttack >= entry.attackIntervalTicks;
         Material placementBlock = entry.placementBlock;
         boolean placing = entry.use && placementBlock != null;
@@ -109,7 +126,9 @@ final class Actions {
         double entityReach = dummy.entityInteractionRange();
         Vec3 eye = dummy.getEyePosition();
         Vec3 look = dummy.getViewVector(1.0F);
-        HitResult block = use ? dummy.pick(blockReach, 1.0F, false) : null;
+        // 放置的是树苗、种子等植物时改为种植：目标是正前方一格的地面，而不是视线对着的方块
+        Block plant = plantBlock();
+        HitResult block = !use ? null : plant != null ? plantTarget(plant) : dummy.pick(blockReach, 1.0F, false);
         EntityHitResult entity = entry.attack ? attackTarget(eye, look) : null;
         if (entity == null && use) {
             double max = Math.min(entityReach * entityReach, block.getType() == HitResult.Type.MISS
@@ -138,7 +157,7 @@ final class Actions {
         }
         BlockHitResult target = block instanceof BlockHitResult hit && hit.getType() == HitResult.Type.BLOCK
             && eye.distanceToSqr(hit.getLocation()) <= blockReach * blockReach ? hit : null;
-        BlockHitResult miningTarget = entry.mine && entity == null ? miningTarget(eye, blockReach, plugin.minimumDurability) : null;
+        BlockHitResult miningTarget = entry.mine && entity == null ? miningTarget(eye, blockReach, plugin.minimumDurability, plant) : null;
         if (miningTarget != null) {
             BlockState state = dummy.level().getBlockState(miningTarget.getBlockPos());
             boolean matches = miningTool(dummy.getMainHandItem(), state) && usable(dummy.getMainHandItem(), plugin.minimumDurability);
@@ -165,17 +184,200 @@ final class Actions {
             nextUse = tick + plugin.useInterval;
             if (entity != null || target == null || !ownedAndLoaded(target.getBlockPos())
                 || !ownedAndLoaded(target.getBlockPos().relative(target.getDirection()))
-                || !dummy.level().mayInteract(dummy, target.getBlockPos())) return;
-            if (dummy.isCreative() || !(CraftMagicNumbers.getItem(placementBlock) instanceof BlockItem blockItem) || !equipPlacement(blockItem)) {
+                || !dummy.level().mayInteract(dummy, target.getBlockPos())) {
+                // 种植位置被占着（植物在生长）时不用频繁检查
+                if (plant != null) nextUse = tick + Math.max(plugin.useInterval, plugin.idleMaxInterval);
+                return;
+            }
+            if (dummy.isCreative() || !(CraftMagicNumbers.getItem(placementBlock) instanceof BlockItem blockItem)) return;
+            // 主手或副手已经拿着就直接用；否则从背包换到主手
+            InteractionHand hand = InteractionHand.MAIN_HAND;
+            if (!dummy.getMainHandItem().is(blockItem) && dummy.getOffhandItem().is(blockItem)) hand = InteractionHand.OFF_HAND;
+            else if (!equipPlacement(blockItem)) {
                 nextUse = tick + Math.max(plugin.useInterval, plugin.idleMaxInterval);
                 return;
             }
-            ItemStack stack = dummy.getMainHandItem();
+            ItemStack stack = dummy.getItemInHand(hand);
             if (dummy.getCooldowns().isOnCooldown(stack)) return;
-            var result = dummy.gameMode.useItemOn(dummy, dummy.level(), stack, InteractionHand.MAIN_HAND, target);
-            if (result.consumesAction()) dummy.getBukkitEntity().swingMainHand();
+            var result = dummy.gameMode.useItemOn(dummy, dummy.level(), stack, hand, target);
+            if (result.consumesAction()) {
+                if (hand == InteractionHand.MAIN_HAND) dummy.getBukkitEntity().swingMainHand();
+                else dummy.getBukkitEntity().swingOffHand();
+            }
             if (dummy.containerMenu != dummy.inventoryMenu) dummy.closeContainer();
         }
+    }
+
+    // ── 钓鱼 ──────────────────────────────────────────────
+
+    /**
+     * 主手拿鱼竿，对准正前方最近的水面抛竿；咬钩后收竿，稍等再抛。
+     * 浮漂连续 3 秒不在水里（落在地上、挂在方块上、水被抽干）、钩到生物或一分钟没咬钩时收回重抛。
+     */
+    private void fish(int tick, int minimumDurability) {
+        FishingHook hook = dummy.fishing;
+        ItemStack rod = dummy.getMainHandItem();
+        if (!rod.is(Items.FISHING_ROD) || !usable(rod, minimumDurability)) {
+            if (hook != null) hook.discard();
+            if (tick < nextRodSearch) return;
+            if (!equip(stack -> stack.is(Items.FISHING_ROD), minimumDurability)) { nextRodSearch = tick + 40; return; }
+            select(0);
+            return;
+        }
+        if (hook != null && !hook.isRemoved()) {
+            boolean caught = bite;
+            dryTicks = hook.isInWater() ? 0 : dryTicks + 1;
+            boolean stuck = dryTicks > 60;
+            boolean hooked = hook.currentState == FishingHook.FishHookState.HOOKED_IN_ENTITY;
+            if (!caught && !stuck && !hooked && tick - castTick < 1200) return;
+            bite = false;
+            useRod(rod);
+            castFailures = stuck ? castFailures + 1 : 0;
+            nextCast = tick + (caught ? 10 : retryDelay());
+            return;
+        }
+        bite = false;
+        if (tick < nextCast) return;
+        Vec3 water = waterAhead();
+        Float aim = water == null ? null : aimPitch(water);
+        if (aim == null) { castFailures++; nextCast = tick + retryDelay(); return; }
+        // 浮漂按抛竿时的视角飞出，先低头对准水面
+        pitch = aim;
+        faceWorkDirection();
+        useRod(rod);
+        castTick = tick;
+        dryTicks = 0;
+        // 抛竿被其他插件取消（例如领地禁止钓鱼）时稍后再试
+        if (dummy.fishing == null) { castFailures++; nextCast = tick + retryDelay(); }
+    }
+
+    /** 连续失败时逐步放慢重试：1、2、4、8 秒，最多 10 秒。 */
+    private int retryDelay() { return Math.min(200, 20 << Math.min(castFailures, 3)); }
+
+    private void useRod(ItemStack rod) {
+        if (dummy.gameMode.useItem(dummy, dummy.level(), rod, InteractionHand.MAIN_HAND).consumesAction()) {
+            dummy.getBukkitEntity().swingMainHand();
+        }
+    }
+
+    /**
+     * 沿假人的水平朝向往前 1–12 格找最近的水面（脚下高度往上 1 格、往下 4 格），
+     * 返回这格水面上沿射线的中点；没有时为 null。
+     */
+    private Vec3 waterAhead() {
+        var level = dummy.level();
+        double radians = Math.toRadians(yaw);
+        double dx = -Math.sin(radians), dz = Math.cos(radians);
+        int feet = dummy.getBlockY();
+        BlockPos column = null, surface = null;
+        double enter = 0;
+        for (double distance = 0.6; distance <= 12.5; distance += 0.05) {
+            double x = dummy.getX() + dx * distance, z = dummy.getZ() + dz * distance;
+            BlockPos here = BlockPos.containing(x, feet, z);
+            if (here.getX() == (column == null ? Integer.MIN_VALUE : column.getX()) && here.getZ() == column.getZ()) continue;
+            if (surface != null) {
+                double middle = (enter + distance) / 2;
+                double height = level.getFluidState(surface).getHeight(level, surface);
+                return new Vec3(dummy.getX() + dx * middle, surface.getY() + height, dummy.getZ() + dz * middle);
+            }
+            column = here;
+            if (!ownedAndLoaded(here)) return null;
+            for (int dy = 1; dy >= -4; dy--) {
+                BlockPos position = here.above(dy);
+                if (!level.getFluidState(position).is(FluidTags.WATER)) {
+                    // 水面以上被方块挡住的格子不算
+                    if (!level.getBlockState(position).getCollisionShape(level, position).isEmpty()) break;
+                    continue;
+                }
+                surface = position;
+                enter = distance;
+                break;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * 按原版浮漂的抛出速度和运动规律（每 tick 先加 -0.03 重力，移动后速度乘 0.92），
+     * 找出让浮漂落到目标水面的低头角度；够不着时为 null。多个角度都能落到时选向下抛、飞行时间短的。
+     */
+    private Float aimPitch(Vec3 target) {
+        double eyeY = dummy.getEyeY();
+        double distance = Math.hypot(target.x - dummy.getX(), target.z - dummy.getZ()) - 0.3;
+        double drop = eyeY - target.y;
+        Float best = null;
+        double bestError = 0.4;
+        for (int angle = 85; angle >= -30; angle--) {
+            double vertical = Math.clamp(-Math.tan(Math.toRadians(angle)), -5, 5);
+            double speed = 0.6 / Math.sqrt(1 + vertical * vertical) + 0.5;
+            double vx = speed, vy = vertical * speed, x = 0, y = 0;
+            for (int step = 0; step < 200; step++) {
+                vy -= 0.03;
+                double nextX = x + vx, nextY = y + vy;
+                if (nextY <= -drop) {
+                    double landed = x + (nextX - x) * (y + drop) / (y - nextY);
+                    double error = Math.abs(landed - distance);
+                    if (error < bestError) { bestError = error; best = (float) angle; }
+                    break;
+                }
+                x = nextX;
+                y = nextY;
+                vx *= 0.92;
+                vy *= 0.92;
+            }
+        }
+        return best;
+    }
+
+    // ── 种植 ──────────────────────────────────────────────
+
+    /** 能长植物的方块（耕地、泥土、沙子、灵魂沙等）。自动种植时正前方一格的这些方块不会被挖掉。 */
+    private static final List<TagKey<Block>> SOILS = List.of(BlockTags.SUPPORTS_VEGETATION, BlockTags.SUPPORTS_DRY_VEGETATION,
+        BlockTags.SUPPORTS_CROPS, BlockTags.SUPPORTS_STEM_CROPS, BlockTags.SUPPORTS_SUGAR_CANE, BlockTags.SUPPORTS_BAMBOO,
+        BlockTags.SUPPORTS_CACTUS, BlockTags.SUPPORTS_AZALEA, BlockTags.SUPPORTS_MANGROVE_PROPAGULE, BlockTags.SUPPORTS_NETHER_WART,
+        BlockTags.SUPPORTS_WARPED_FUNGUS, BlockTags.SUPPORTS_CRIMSON_FUNGUS, BlockTags.SUPPORTS_NETHER_SPROUTS);
+
+    /** 树苗、作物、种子、花、甘蔗、仙人掌、竹子等种在地上的植物。 */
+    static boolean plant(Block block) {
+        return block instanceof net.minecraft.world.level.block.VegetationBlock
+            || block instanceof net.minecraft.world.level.block.SugarCaneBlock
+            || block instanceof net.minecraft.world.level.block.CactusBlock
+            || block instanceof net.minecraft.world.level.block.BambooSaplingBlock;
+    }
+
+    /** 开启放置且放置的是植物时，返回要种的植物方块；否则为 null。 */
+    private Block plantBlock() {
+        Material selected = entry.placementBlock;
+        if (!entry.use || selected == null || !(CraftMagicNumbers.getItem(selected) instanceof BlockItem item)) return null;
+        return plant(item.getBlock()) ? item.getBlock() : null;
+    }
+
+    private static boolean soil(BlockState state) {
+        if (state.getBlock() instanceof net.minecraft.world.level.block.FarmlandBlock) return true;
+        for (TagKey<Block> tag : SOILS) if (state.is(tag)) return true;
+        return false;
+    }
+
+    /**
+     * 种植位置：只看正前方一格。地面高出脚下一格（种在视线高度）或与脚下平齐（种在脚下高度），
+     * 地面上方是空的，并且原版规则允许这株植物长在这里（作物要耕地、树苗要泥土类、甘蔗要挨着水等）。
+     * 没有可种的位置时返回 MISS。
+     */
+    private BlockHitResult plantTarget(Block plant) {
+        var level = dummy.level();
+        Direction forward = Direction.fromYRot(yaw);
+        BlockPos front = dummy.blockPosition().relative(forward);
+        BlockState planted = plant.defaultBlockState();
+        for (BlockPos ground : List.of(front, front.below())) {
+            BlockPos spot = ground.above();
+            if (!ownedAndLoaded(spot)) break;
+            BlockState above = level.getBlockState(spot), groundState = level.getBlockState(ground);
+            // 前方脚下是空气、草丛、雪层等可替换的方块时，地面是再下面一格
+            if (ground.equals(front) && groundState.canBeReplaced() && !groundState.is(plant)) continue;
+            if (!above.canBeReplaced() || !above.getFluidState().isEmpty() || !planted.canSurvive(level, spot)) break;
+            return new BlockHitResult(Vec3.atCenterOf(ground).add(0, 0.5, 0), Direction.UP, ground, false);
+        }
+        return BlockHitResult.miss(dummy.getEyePosition(), Direction.UP, front);
     }
 
     private boolean equipPlacement(BlockItem blockItem) {
@@ -236,7 +438,8 @@ final class Actions {
             && Bukkit.isOwnedByCurrentRegion(target.getBukkitEntity());
     }
 
-    private BlockHitResult miningTarget(Vec3 eye, double reach, int minimumDurability) {
+    /** plant 不为 null 时正在自动种植：正前方一格的植物和土类地面不挖。 */
+    private BlockHitResult miningTarget(Vec3 eye, double reach, int minimumDurability, Block plant) {
         Direction forward = Direction.fromYRot(yaw);
         BlockPos origin = dummy.blockPosition();
         double eyeOffset = (eye.x - origin.getX() - 0.5) * forward.getStepX()
@@ -256,12 +459,13 @@ final class Actions {
             if (!ownedAndLoaded(lower)) break;
             BlockPos upper = lower.above();
             BlockState upperState = level.getBlockState(upper);
-            if (matchesSample(samples, upperState)) {
+            boolean keep = plant != null && distance == 1;
+            if (matchesSample(samples, upperState) && !(keep && (upperState.is(plant) || soil(upperState)))) {
                 BlockHitResult hit = miningHit(eye, reach, upper, upperState, minimumDurability);
                 if (hit != null) return hit;
             }
             BlockState lowerState = level.getBlockState(lower);
-            if (matchesSample(samples, lowerState)) {
+            if (matchesSample(samples, lowerState) && !(keep && (lowerState.is(plant) || soil(lowerState)))) {
                 BlockHitResult hit = miningHit(eye, reach, lower, lowerState, minimumDurability);
                 if (hit != null) return hit;
             }
