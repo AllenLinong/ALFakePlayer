@@ -36,12 +36,17 @@ final class NativeDummy extends ServerPlayer {
     private int lastChunkZ = Integer.MIN_VALUE;
     final SinkLink link = new SinkLink();
 
+    /** 和原版客户端默认一样显示皮肤的所有外层（帽子、外套、袖子、裤腿），否则皮肤上的头发、帽子等看不到。 */
+    private static final ClientInformation OPTIONS = new ClientInformation("en_us", 2,
+        net.minecraft.world.entity.player.ChatVisiblity.FULL, true, 0x7F, net.minecraft.world.entity.player.Player.DEFAULT_MAIN_HAND,
+        false, false, net.minecraft.server.level.ParticleStatus.ALL);
+
     /** Entity.bukkitEntity：在第一次使用前换成 DummyCraftPlayer。找不到时领地兼容不可用，假人照常工作。 */
     private static final java.lang.reflect.Field BUKKIT_ENTITY = bukkitEntityField();
 
     NativeDummy(MinecraftServer server, ServerLevel level, GameProfile profile, boolean ignoredByHostileMobs,
                 Roster.Entry entry, String ownerName) {
-        super(server, level, profile, ClientInformation.createDefault());
+        super(server, level, profile, OPTIONS);
         this.ignoredByHostileMobs = ignoredByHostileMobs;
         this.entry = entry;
         if (entry != null && BUKKIT_ENTITY != null && getBukkitEntityRaw() == null) {

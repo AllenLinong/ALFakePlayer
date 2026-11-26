@@ -48,7 +48,9 @@ final class TabBenchmark {
     private int target;
     /** 已经说了再见、几秒后下线的测试假人。 */
     private final Set<UUID> leaving = new HashSet<>();
-    private long nextChurn, nextGroupCheck;
+    private long nextChurn, nextGroupCheck, skinsChecked;
+    /** 已经发给客户端的皮肤，null 为原版默认皮肤。 */
+    private final Map<UUID, Skins.Texture> skins = new HashMap<>();
     private ScheduledTask task;
 
     TabBenchmark(DummyPlayers plugin) { this.plugin = plugin; }
@@ -97,6 +99,7 @@ final class TabBenchmark {
         leaving.clear();
         if (count != 0) send(new ClientboundPlayerInfoRemovePacket(List.copyOf(active.keySet())));
         active.clear();
+        skins.clear();
         stop();
         if (count != 0) shareChanges();
         return count;
@@ -108,6 +111,7 @@ final class TabBenchmark {
         leaving.clear();
         if (!active.isEmpty()) send(new ClientboundPlayerInfoRemovePacket(List.copyOf(active.keySet())));
         active.clear();
+        skins.clear();
         stop();
         viewers.clear();
     }
@@ -143,6 +147,10 @@ final class TabBenchmark {
             nextChurn = now + churnDelay();
         }
         if (changed) shareChanges();
+        if (plugin.skins().changedAt() != skinsChecked) {
+            skinsChecked = plugin.skins().changedAt();
+            refreshSkins();
+        }
         if (target > 0 && now >= nextGroupCheck) {
             nextGroupCheck = now + 60_000;
             plugin.testProfiles().recheck().thenAccept(this::refreshLabels);
@@ -217,6 +225,7 @@ final class TabBenchmark {
 
     private void remove(UUID id, boolean announce) {
         leaving.remove(id);
+        skins.remove(id);
         Shown shown = active.remove(id);
         if (shown == null) return;
         send(new ClientboundPlayerInfoRemovePacket(List.of(id)));
@@ -247,7 +256,7 @@ final class TabBenchmark {
             if (profile == null) continue;
             var shown = new Shown(profile.name(), plugin.testLabel(profile.name(), profile.group()));
             current.setValue(shown);
-            renamed.add(entry(current.getKey(), shown));
+            renamed.add(sentEntry(current.getKey(), shown));
         }
         if (renamed.isEmpty()) return;
         send(new ClientboundPlayerInfoUpdatePacket(RENAME, renamed));
@@ -279,7 +288,7 @@ final class TabBenchmark {
         if (connection == null || viewers.put(player.getUniqueId(), connection) == connection) return;
         if (!active.isEmpty()) {
             var entries = new ArrayList<Entry>();
-            active.forEach((id, shown) -> entries.add(entry(id, shown)));
+            active.forEach((id, shown) -> entries.add(sentEntry(id, shown)));
             connection.send(new ClientboundPlayerInfoUpdatePacket(ADD, entries));
         }
     }
@@ -290,8 +299,29 @@ final class TabBenchmark {
 
     private void shareChanges() { plugin.shareTests(null); }
 
-    private static Entry entry(UUID id, Shown shown) {
-        return new Entry(id, new GameProfile(id, shown.name()), true, 0, GameType.SURVIVAL,
+    /** 刚获取到皮肤的测试假人：重新加入 TAB，客户端才会换上新皮肤。 */
+    private void refreshSkins() {
+        var changed = new ArrayList<UUID>();
+        for (UUID id : active.keySet()) if (!Objects.equals(plugin.skins().texture(id), skins.get(id))) changed.add(id);
+        if (changed.isEmpty()) return;
+        send(new ClientboundPlayerInfoRemovePacket(changed));
+        var entries = new ArrayList<Entry>();
+        for (UUID id : changed) entries.add(entry(id, active.get(id)));
+        send(new ClientboundPlayerInfoUpdatePacket(ADD, entries));
+    }
+
+    /** 带上当前的皮肤，并记下发出的是哪个。 */
+    private Entry entry(UUID id, Shown shown) {
+        Skins.Texture texture = plugin.skins().texture(id);
+        skins.put(id, texture);
+        return build(id, shown, texture);
+    }
+
+    /** 带上已经发给其他人的皮肤，所有人看到的一样。 */
+    private Entry sentEntry(UUID id, Shown shown) { return build(id, shown, skins.get(id)); }
+
+    private static Entry build(UUID id, Shown shown, Skins.Texture texture) {
+        return new Entry(id, new GameProfile(id, shown.name(), Skins.properties(texture)), true, 0, GameType.SURVIVAL,
             PaperAdventure.asVanilla(shown.label()), true, 0, null);
     }
 

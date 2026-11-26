@@ -34,8 +34,11 @@ final class RemoteTab {
         Action.UPDATE_GAME_MODE, Action.UPDATE_LATENCY, Action.UPDATE_DISPLAY_NAME, Action.UPDATE_HAT);
     private static final EnumSet<Action> RENAME = EnumSet.of(Action.UPDATE_DISPLAY_NAME);
 
-    /** name：游戏档案名（决定 TAB 排序和皮肤）；label：显示名的 JSON。 */
-    private record Shown(String name, String label) { }
+    /** name：游戏档案名（决定 TAB 排序）；label：显示名的 JSON；skin：皮肤，null 为原版默认皮肤。 */
+    private record Shown(String name, String label, Skins.Texture skin) {
+        Shown(String name, String label) { this(name, label, null); }
+        Shown withSkin(Skins.Texture texture) { return new Shown(name, label, texture); }
+    }
 
     private final DummyPlayers plugin;
     private final Map<UUID, ServerGamePacketListenerImpl> viewers = new HashMap<>();
@@ -106,17 +109,19 @@ final class RemoteTab {
             // 还没收到显示名时先显示名字，不带前缀
             String label = broadcast != null && broadcast.name().equals(name) ? broadcast.label()
                 : JSON.serialize(Component.text(entry != null ? entry.name() : name));
-            wanted.put(id, new Shown(name, label));
+            wanted.put(id, new Shown(name, label, plugin.skins().texture(id)));
         });
         tests.forEach((server, entries) -> {
-            if (online(server)) entries.forEach(wanted::putIfAbsent);
+            if (online(server)) entries.forEach((id, test) -> wanted.putIfAbsent(id, test.withSkin(plugin.skins().texture(id))));
         });
         List<UUID> removed = new ArrayList<>();
         List<ClientboundPlayerInfoUpdatePacket.Entry> added = new ArrayList<>(), renamed = new ArrayList<>();
         for (Iterator<Map.Entry<UUID, Shown>> iterator = shown.entrySet().iterator(); iterator.hasNext(); ) {
             var current = iterator.next();
             Shown next = wanted.get(current.getKey());
-            if (next != null && next.name().equals(current.getValue().name())) continue;
+            // 名字或皮肤变了要重新加入，客户端才会换上
+            if (next != null && next.name().equals(current.getValue().name())
+                && java.util.Objects.equals(next.skin(), current.getValue().skin())) continue;
             iterator.remove();
             // 假人已经回到本服运行时，条目由本服的实体接管，不能删除，否则客户端不显示这个玩家
             if (!plugin.live.containsKey(current.getKey())) removed.add(current.getKey());
@@ -158,7 +163,7 @@ final class RemoteTab {
         net.minecraft.network.chat.Component display;
         try { display = PaperAdventure.asVanilla(JSON.deserialize(shown.label())); }
         catch (RuntimeException invalid) { display = net.minecraft.network.chat.Component.literal(shown.name()); }
-        return new ClientboundPlayerInfoUpdatePacket.Entry(id, new GameProfile(id, shown.name()), true, 0,
+        return new ClientboundPlayerInfoUpdatePacket.Entry(id, new GameProfile(id, shown.name(), Skins.properties(shown.skin())), true, 0,
             GameType.SURVIVAL, display, true, 0, null);
     }
 

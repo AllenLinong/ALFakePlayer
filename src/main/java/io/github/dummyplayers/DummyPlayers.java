@@ -76,6 +76,7 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
     private final TestChat testChat = new TestChat(this);
     private volatile TestProfiles.Settings testSettings;
     private final RemoteTab remoteTab = new RemoteTab(this);
+    private final Skins skins = new Skins(this);
     /** 已注册的 PlaceholderAPI 扩展；用 Object 保存，未安装 PlaceholderAPI 时不会加载它的类。 */
     private Object placeholders;
     /** 各档位的运行半径（区块），即假人的模拟距离。重载时整体替换。 */
@@ -101,6 +102,7 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
     TestProfiles testProfiles() { return testProfiles; }
 
     TabBenchmark benchmark() { return benchmark; }
+    Skins skins() { return skins; }
 
     TestChat testChat() { return testChat; }
 
@@ -274,6 +276,8 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
         YamlConfiguration text = loadMessages(configs, config.getString("language", "zh_CN"));
         var tests = TestProfiles.Settings.read(configs.load("tab_test.yml", yaml -> { }), getLogger());
         var chat = TestChat.Settings.read(configs.load("tab_chat.yml", yaml -> { }));
+        boolean skinsOn = config.getBoolean("skins.enabled", true);
+        List<String> skinNames = config.getStringList("skins.names");
         int slotsMax = option(config, "slots.max_per_owner", 10, 1, 100);
         int slotsDefault = option(config, "slots.default", 1, 1, slotsMax);
         double coins = config.getDouble("purchase.coins", 300.0);
@@ -355,6 +359,7 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
             ClaimIdentity.configure(claimPlugins);
             testSettings = tests;
             testChat.configure(chat);
+            skins.configure(skinsOn, skinNames, tests.names());
             // 聊天开关可能变了，其他子服据此决定由谁安排跨服聊天
             if (network != null && benchmark.count() > 0) shareTests(null);
             if (roster != null) loadTestProfiles();
@@ -673,9 +678,14 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
         });
     }
 
+    /** 召唤前的准备：LuckPerms 权限组，同时等一下假人的皮肤（最多 4 秒，没等到先用默认皮肤）。 */
+    private CompletableFuture<Void> prepareSummon(Roster.Entry entry) {
+        return groups.prepare(entry, luckPermsGroup).thenCombine(skins.ready(entry.id), (group, skin) -> null);
+    }
+
     /** 准备权限组并获取运行租约，再回到玩家所在区域生成。tier 为 null 表示跨服召回。 */
     private void admit(Player owner, Roster.Entry entry, DummyTier tier) {
-        groups.prepare(entry, luckPermsGroup)
+        prepareSummon(entry)
             .orTimeout(10, TimeUnit.SECONDS)
             .thenCompose(unused -> roster.acquire(entry, true))
             .whenComplete((claim, error) -> {
@@ -805,7 +815,7 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
         }
         MinecraftServer server = ((CraftServer) Bukkit.getServer()).getServer();
         var level = ((CraftWorld) position.getWorld()).getHandle();
-        GameProfile profile = new GameProfile(entry.id, nativeName);
+        GameProfile profile = skins.profile(entry.id, nativeName);
         // 领地插件按主人判断假人的权限时使用主人的名字（见 ClaimIdentity）
         Player ownerOnline = Bukkit.getPlayer(entry.key.owner());
         String ownerName = ownerOnline != null ? ownerOnline.getName() : Bukkit.getOfflinePlayer(entry.key.owner()).getName();
@@ -2100,7 +2110,7 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
      */
     private void restore(Parked state, Consumer<Boolean> done) {
         Roster.Entry entry = state.entry;
-        groups.prepare(entry, luckPermsGroup).orTimeout(10, TimeUnit.SECONDS).whenComplete((unused, error) -> {
+        prepareSummon(entry).orTimeout(10, TimeUnit.SECONDS).whenComplete((unused, error) -> {
             if (error != null) {
                 getLogger().log(Level.WARNING, "Could not update the LuckPerms group of " + entry.profile() + " after reload", error);
             }
@@ -2257,7 +2267,7 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
         } catch (RuntimeException | LinkageError error) {
             getLogger().log(Level.WARNING, "Cleanup failed", error);
         } finally {
-            try { ListenerGuard.restore(); }
+            try { ListenerGuard.restore(); skins.close(); }
             finally {
                 try { CraftEngineCompat.restore(); }
                 finally {
