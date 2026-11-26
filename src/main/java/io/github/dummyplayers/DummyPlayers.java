@@ -106,6 +106,7 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
 
     /** 其他子服正在显示的测试假人名字（小写），本服选名字时避开。 */
     Set<String> remoteTestNames() { return remoteTab.testNames(); }
+    Map<String, Map<UUID, String>> remoteChatHosts() { return remoteTab.chatHosts(); }
     private DummyNames names;
     private volatile PurchasePrice purchasePrice;
     private FoliaBridge folia;
@@ -217,6 +218,7 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
                 1000, networkSettings.heartbeatMillis(), TimeUnit.MILLISECONDS);
             // 其他插件全部启动后再检查经济服务，提示缺失的依赖；多世界插件的世界也已加载，再召唤关服前在运行的假人
             Bukkit.getGlobalRegionScheduler().runDelayed(this, task -> {
+                ListenerGuard.install(this, getLogger());
                 checkServices();
                 resummonAfterRestart();
             }, 1);
@@ -353,6 +355,8 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
             ClaimIdentity.configure(claimPlugins);
             testSettings = tests;
             testChat.configure(chat);
+            // 聊天开关可能变了，其他子服据此决定由谁安排跨服聊天
+            if (network != null && benchmark.count() > 0) shareTests(null);
             if (roster != null) loadTestProfiles();
         };
     }
@@ -880,6 +884,8 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
         });
         var body = new JsonObject();
         body.add("entries", entries);
+        var chat = testChat.settings();
+        body.addProperty("chat", chat != null && chat.enabled() && chat.crossServer());
         if (to == null) network.broadcast("tab_test", body);
         else network.send(to, "tab_test", body);
     }
@@ -1119,13 +1125,13 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
                     String name = item.get("name").getAsString();
                     entries.put(uuid(item, "id"), new String[] {name, item.has("label") ? item.get("label").getAsString() : null});
                 }
-                remoteTab.tests(from, entries);
+                remoteTab.tests(from, entries, !body.has("chat") || body.get("chat").getAsBoolean());
             }
             case "purchase_items" -> roster.reloadPurchaseItems().thenAccept(items -> {
                 var current = purchasePrice;
                 purchasePrice = new PurchasePrice(current.coins(), current.points(), items);
             });
-            default -> { }
+            default -> { if (type.startsWith("tab_chat_")) testChat.relay().handle(type, from, body, reply); }
         }
     }
 
@@ -1299,7 +1305,10 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
     }
 
     /** 领地插件在本插件之后启用、或被单独重载时，重新登记它的类加载器。 */
-    @EventHandler public void onPluginEnable(PluginEnableEvent event) { ClaimIdentity.refresh(null); }
+    @EventHandler public void onPluginEnable(PluginEnableEvent event) {
+        ClaimIdentity.refresh(null);
+        ListenerGuard.install(this, getLogger());
+    }
     @EventHandler public void onPluginDisable(PluginDisableEvent event) { ClaimIdentity.refresh(event.getPlugin()); }
 
     @EventHandler(priority = EventPriority.MONITOR) public void onJoin(PlayerJoinEvent event) {
@@ -1628,6 +1637,8 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
         String plugin = TestChat.formattingPlugin();
         String mode = testChat.viaServerChat() ? messagePlain("benchmark_chat_via_server") + (plugin == null ? "" : "（" + plugin + "）")
             : messagePlain("benchmark_chat_via_format");
+        String leader = testChat.relay().participating() ? testChat.relay().leader() : null;
+        if (leader != null) mode += messagePlain("benchmark_chat_leader").replace("%server%", leader);
         var ai = testChat.ai();
         String aiState = !ai.usable() ? messagePlain("benchmark_ai_off")
             : ai.settings().model() + "，" + messagePlain("benchmark_ai_today") + " " + ai.usage()
@@ -2246,12 +2257,15 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
         } catch (RuntimeException | LinkageError error) {
             getLogger().log(Level.WARNING, "Cleanup failed", error);
         } finally {
-            try { CraftEngineCompat.restore(); }
+            try { ListenerGuard.restore(); }
             finally {
-                try { if (roster != null) roster.close(); }
+                try { CraftEngineCompat.restore(); }
                 finally {
-                    try { if (network != null) network.close(); }
-                    finally { if (database != null) database.close(); }
+                    try { if (roster != null) roster.close(); }
+                    finally {
+                        try { if (network != null) network.close(); }
+                        finally { if (database != null) database.close(); }
+                    }
                 }
             }
         }

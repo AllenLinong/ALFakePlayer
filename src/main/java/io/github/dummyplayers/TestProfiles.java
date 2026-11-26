@@ -34,7 +34,9 @@ final class TestProfiles {
             if (names.isEmpty()) throw new IllegalArgumentException("tab_test.yml: names must contain at least one valid name");
             var groups = new LinkedHashMap<String, Integer>();
             ConfigurationSection section = yaml.getConfigurationSection("groups");
-            if (section != null) for (String group : section.getKeys(false)) {
+            // Bukkit 把键里的 . 当作路径分隔符，lv.1: 50 读出来是 lv → 1: 50；取所有叶子键，拼回完整组名 lv.1
+            if (section != null) for (String group : section.getKeys(true)) {
+                if (section.isConfigurationSection(group)) continue;
                 int weight = section.getInt(group, -1);
                 if (weight < 1) throw new IllegalArgumentException("tab_test.yml: groups." + group + " must be a positive whole number");
                 groups.merge(group.strip().toLowerCase(Locale.ROOT), weight, Integer::sum);

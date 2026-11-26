@@ -20,6 +20,7 @@ import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
 import org.bukkit.event.player.PlayerJoinEvent;
+import org.bukkit.event.player.PlayerQuitEvent;
 
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
@@ -70,7 +71,7 @@ final class TestChat implements Listener {
                     long quietMin, long quietMax, int dialoguePercent,
                     int welcome, long welcomeCooldown, int joinGreet, int farewell, int answer, int mention, int followUp, int question,
                     List<Keyword> ignore, List<Rule> rules, Map<String, List<String>> lines, List<List<Step>> dialogues,
-                    TestAi.Settings ai) {
+                    TestAi.Settings ai, boolean crossServer, String forwarded) {
 
         static Settings read(ConfigurationSection yaml) {
             String mode = yaml.getString("send_mode", "auto").strip().toLowerCase(Locale.ROOT);
@@ -116,6 +117,10 @@ final class TestChat implements Listener {
                 }
                 dialogues.add(List.copyOf(steps));
             }
+            String forwarded = String.valueOf(yaml.get("cross_server.forwarded", "auto")).strip().toLowerCase(Locale.ROOT);
+            if (!Set.of("auto", "true", "false").contains(forwarded)) {
+                throw new IllegalArgumentException("tab_chat.yml: cross_server.forwarded must be auto, true or false");
+            }
             int share = limits.getInt("max_share_percent", 40);
             if (share < 1 || share > 90) throw new IllegalArgumentException("tab_chat.yml: limits.max_share_percent must be 1-90");
             int max = limits.getInt("max_messages", 10);
@@ -135,7 +140,7 @@ final class TestChat implements Listener {
                 percent(chances.get("answer"), 50, "chances.answer"), percent(chances.get("mention"), 90, "chances.mention"),
                 percent(chances.get("follow_up"), 45, "chances.follow_up"), percent(chances.get("question"), 25, "chances.question"),
                 keywords(yaml.get("ignore_keywords"), "tab_chat.yml: ignore_keywords"), List.copyOf(rules), Map.copyOf(lines),
-                List.copyOf(dialogues), TestAi.Settings.read(section(yaml, "ai")));
+                List.copyOf(dialogues), TestAi.Settings.read(section(yaml, "ai")), yaml.getBoolean("cross_server.enabled", true), forwarded);
         }
 
         private static ConfigurationSection section(ConfigurationSection yaml, String path) {
@@ -190,19 +195,21 @@ final class TestChat implements Listener {
         }
     }
 
-    /** 在线的测试假人：key 为小写名字。 */
-    record Speaker(String key, String name, UUID id, String group, boolean talkative, String persona) { }
+    /** 在线的测试假人：key 为小写名字；server 为它所在的其他子服，在本服时为 null（这时才有 group）。 */
+    record Speaker(String key, String name, UUID id, String group, boolean talkative, String persona, String server) { }
 
     /** 聊天记录中的一条。 */
     record Said(String name, boolean real, String text, long at) { }
 
-    /** 排队中的一句话。after 在发出后调用，参数是当时在线的测试假人。 */
-    private record Line(String speaker, String text, int priority, long ready, long expire, Consumer<Map<String, Speaker>> after) { }
+    /** 排队中的一句话。after 在发出后调用，参数是当时在线的测试假人。farewell：其他子服的测试假人说完这句就下线。 */
+    private record Line(String speaker, String text, int priority, long ready, long expire, Consumer<Map<String, Speaker>> after,
+                        boolean farewell) { }
 
     private record Partner(String speaker, long until) { }
 
     private final DummyPlayers plugin;
     private final TestAi ai;
+    private final TestChatNetwork relay;
     private volatile Settings settings;
     private final List<Line> pending = new ArrayList<>();
     private final ArrayDeque<Long> sent = new ArrayDeque<>();
@@ -226,9 +233,12 @@ final class TestChat implements Listener {
     TestChat(DummyPlayers plugin) {
         this.plugin = plugin;
         this.ai = new TestAi(plugin);
+        this.relay = new TestChatNetwork(plugin, this);
     }
 
     TestAi ai() { return ai; }
+
+    TestChatNetwork relay() { return relay; }
 
     Settings settings() { return settings; }
 
@@ -240,10 +250,12 @@ final class TestChat implements Listener {
 
     void start() {
         if (task == null) task = Bukkit.getAsyncScheduler().runAtFixedRate(plugin, unused -> tick(), 1, 500, TimeUnit.MILLISECONDS);
+        relay.start();
     }
 
     void stop() {
         if (task != null) { task.cancel(); task = null; }
+        relay.stop();
         synchronized (this) { pending.clear(); }
         voices.clear();
     }
@@ -281,40 +293,61 @@ final class TestChat implements Listener {
             return;
         }
         if (!real(player) || event.isCancelled() && !listenCancelled()) return;
-        heard(player.getUniqueId(), player.getName(), PlainTextComponentSerializer.plainText().serialize(event.message()));
+        String text = PlainTextComponentSerializer.plainText().serialize(event.message());
+        heard(player.getUniqueId(), player.getName(), text);
+        relay.heard(player.getUniqueId(), player.getName(), text);
     }
 
     @EventHandler(priority = EventPriority.MONITOR)
     public void onJoin(PlayerJoinEvent event) {
         Player player = event.getPlayer();
-        if (real(player)) joined(player.getUniqueId(), player.getName(), !player.hasPlayedBefore());
+        if (!real(player)) return;
+        relay.joined(player);
+        boolean firstTime = !player.hasPlayedBefore();
+        // 跨服时由负责安排的子服决定要不要欢迎；从别的子服换过来的不欢迎
+        if (!relay.leading()) relay.realJoined(player.getUniqueId(), player.getName(), firstTime);
+        else if (!relay.switched(player.getUniqueId(), plugin.serverId)) joined(player.getUniqueId(), player.getName(), firstTime);
+    }
+
+    @EventHandler(priority = EventPriority.MONITOR)
+    public void onQuit(PlayerQuitEvent event) {
+        if (event.getPlayer() instanceof CraftPlayer craft && !(craft.getHandle() instanceof NativeDummy)) relay.quit(event.getPlayer());
     }
 
     static boolean real(Player player) {
         return player instanceof CraftPlayer craft && !(craft.getHandle() instanceof NativeDummy) && player.isOnline();
     }
 
-    private static int realOnline() {
-        int count = 0;
-        for (Player player : Bukkit.getOnlinePlayers()) if (player instanceof CraftPlayer craft && !(craft.getHandle() instanceof NativeDummy)) count++;
-        return count;
-    }
+    /** 在线真人数；跨服时为全网的。 */
+    private int realOnline() { return relay.realOnline(); }
 
     // ══ 在线的测试假人 ════════════════════════════════════
 
-    /** 当前在 TAB 中的测试假人。不能在持有本对象的锁时调用（TabBenchmark 会在它的锁里调用本类）。 */
+    /**
+     * 由本服安排说话的测试假人：本服 TAB 中的，跨服时再加上其他子服的；跨服时由其他子服负责安排时为空。
+     * 不能在持有本对象的锁时调用（TabBenchmark 会在它的锁里调用本类）。
+     */
     private Map<String, Speaker> online() {
         var result = new HashMap<String, Speaker>();
         Settings s = settings;
-        if (s == null || !plugin.testProfiles().ready()) return result;
-        var personas = s.ai().personas();
+        if (s == null || !plugin.testProfiles().ready() || !relay.leading()) return result;
+        result.putAll(local());
+        relay.remoteHosts().forEach((server, entries) -> entries.forEach((id, name) -> {
+            String key = name.toLowerCase(Locale.ROOT);
+            result.putIfAbsent(key, new Speaker(key, name, id, "", talkative(id), persona(id), server));
+        }));
+        return result;
+    }
+
+    /** 本服 TAB 中的测试假人。 */
+    private Map<String, Speaker> local() {
+        var result = new HashMap<String, Speaker>();
+        if (settings == null || !plugin.testProfiles().ready()) return result;
         for (var shown : plugin.benchmark().entries().values()) {
             var profile = plugin.testProfiles().profile(shown.name());
             if (profile == null) continue;
             String key = profile.name().toLowerCase(Locale.ROOT);
-            boolean talkative = trait(profile.id(), 1) < s.talkativePercent();
-            String persona = personas.isEmpty() ? "" : personas.get(trait(profile.id(), 2) % personas.size());
-            result.put(key, new Speaker(key, profile.name(), profile.id(), profile.group(), talkative, persona));
+            result.put(key, new Speaker(key, profile.name(), profile.id(), profile.group(), talkative(profile.id()), persona(profile.id()), null));
         }
         return result;
     }
@@ -346,7 +379,8 @@ final class TestChat implements Listener {
         synchronized (this) {
             long now = System.currentTimeMillis();
             if (!s.enabled() || online.isEmpty()) { pending.clear(); return; }
-            pending.removeIf(line -> line.expire() < now || !online.containsKey(line.speaker()));
+            // 其他子服的测试假人刚进服时，它的 TAB 条目可能比要说的话晚到，打完字时还不在才作废
+            pending.removeIf(line -> line.expire() < now || line.ready() <= now && !online.containsKey(line.speaker()));
             while (!sent.isEmpty() && sent.peekFirst() <= now - s.window()) sent.pollFirst();
             if (now >= nextAllowed && !pending.isEmpty()) {
                 int capacity = capacity(real, now);
@@ -371,7 +405,9 @@ final class TestChat implements Listener {
             if (real == 0) nextIdle = Math.max(nextIdle, now + s.quietMin());
         }
         if (deliver != null) {
-            send(online.get(deliver.speaker()), deliver.text());
+            Speaker speaker = online.get(deliver.speaker());
+            if (speaker.server() == null) send(speaker, deliver.text(), false);
+            else relay.say(speaker.server(), speaker.name(), deliver.text(), deliver.farewell(), false);
             if (deliver.after() != null) synchronized (this) { deliver.after().accept(online); }
         }
         if (idleCall != null) idleCall.run();
@@ -432,22 +468,44 @@ final class TestChat implements Listener {
 
     // ══ 发送 ══════════════════════════════════════════════
 
-    private void send(Speaker speaker, String text) {
+    /** 本服的测试假人说一句，再告诉其他子服。manual 为 /afp test say。 */
+    private void send(Speaker speaker, String text, boolean manual) {
         if (speaker == null) return;
         plugin.getLogger().info("[TAB test] " + speaker.name() + ": " + text);
+        boolean viaChat = false;
         if (viaServerChat()) {
             try {
-                if (chat(speaker, text)) return;
+                viaChat = chat(speaker, text);
             } catch (RuntimeException | LinkageError error) {
                 chatModeBroken = true;
                 plugin.getLogger().log(Level.WARNING, "Could not send test player chat through the server chat; using tab_chat.yml format until /afp reload", error);
             }
         }
+        if (!viaChat) {
+            String line = settings.format().replace("%prefix%", plugin.groupPrefix(speaker.group())).replace("%name%", speaker.name())
+                .replace("%message%", text);
+            Component message = plugin.legacy(line);
+            for (Player player : Bukkit.getOnlinePlayers()) if (real(player)) player.sendMessage(message);
+        }
+        relay.said(speaker.name(), speaker.group(), text, viaChat, manual);
+    }
+
+    /** 负责安排的子服让本服的测试假人说一句。它已经不在本服 TAB 中时不说。 */
+    void speakHere(String name, String text, boolean manual) {
         Settings s = settings;
-        String line = s.format().replace("%prefix%", plugin.groupPrefix(speaker.group())).replace("%name%", speaker.name())
-            .replace("%message%", text);
-        Component message = plugin.legacy(line);
-        for (Player player : Bukkit.getOnlinePlayers()) if (real(player)) player.sendMessage(message);
+        if (s == null || !s.enabled()) return;
+        send(local().get(name.toLowerCase(Locale.ROOT)), text, manual);
+    }
+
+    /** 其他子服用 /afp test say 让测试假人说了一句：本服负责安排时记下来，限流和上下文算上它。 */
+    void heardTest(String name, String text) {
+        if (!relay.leading()) return;
+        synchronized (this) {
+            long now = System.currentTimeMillis();
+            sent.addLast(now);
+            spokeAt.put(name.toLowerCase(Locale.ROOT), now);
+            remember(new Said(name, false, text, now));
+        }
     }
 
     /**
@@ -482,18 +540,22 @@ final class TestChat implements Listener {
         }
     }
 
-    /** /afp test say：立即说一句，不受限流。 */
+    /** /afp test say：立即说一句，不受限流。测试假人在其他子服时由那个子服说。 */
     boolean say(String name, String text) {
-        Map<String, Speaker> online = online();
-        Speaker speaker = online.get(name.toLowerCase(Locale.ROOT));
-        if (speaker == null) return false;
-        synchronized (this) {
+        Speaker speaker = local().get(name.toLowerCase(Locale.ROOT));
+        if (speaker == null) {
+            String host = relay.host(name);
+            if (host == null) return false;
+            relay.say(host, name, text, false, true);
+            return true;
+        }
+        if (relay.leading()) synchronized (this) {
             long now = System.currentTimeMillis();
             sent.addLast(now);
             spokeAt.put(speaker.key(), now);
             remember(new Said(speaker.name(), false, text, now));
         }
-        send(speaker, text);
+        send(speaker, text, true);
         return true;
     }
 
@@ -518,8 +580,12 @@ final class TestChat implements Listener {
 
     /** 排队一句话：从 notBefore 开始打字，打完才能发出。 */
     private void queue(String speaker, String text, int priority, long notBefore, Consumer<Map<String, Speaker>> after) {
+        queue(speaker, text, priority, notBefore, after, false);
+    }
+
+    private void queue(String speaker, String text, int priority, long notBefore, Consumer<Map<String, Speaker>> after, boolean farewell) {
         long ready = Math.max(System.currentTimeMillis(), notBefore) + typing(text);
-        pending.add(new Line(speaker, text, priority, ready, ready + settings.expire(), after));
+        pending.add(new Line(speaker, text, priority, ready, ready + settings.expire(), after, farewell));
     }
 
     private boolean busy(String speaker) {
@@ -672,7 +738,7 @@ final class TestChat implements Listener {
 
     // ══ 欢迎、进服、下线 ══════════════════════════════════
 
-    private void joined(UUID player, String name, boolean firstTime) {
+    void joined(UUID player, String name, boolean firstTime) {
         Settings s = settings;
         if (s == null || !s.enabled()) return;
         Map<String, Speaker> online = online();
@@ -695,10 +761,16 @@ final class TestChat implements Listener {
         }
     }
 
-    /** 测试假人自己进服：偶尔打个招呼，另一个人回应。由 TabBenchmark 调用（它持有自己的锁）。 */
+    /** 测试假人自己进服：偶尔打个招呼，另一个人回应。由 TabBenchmark 调用（它持有自己的锁）；跨服时由负责安排的子服决定。 */
     void testJoined(String name, UUID id) {
+        if (relay.leading()) greet(name, id);
+        else relay.testJoined(name, id);
+    }
+
+    /** 由本服安排测试假人进服后的招呼。其他子服转来的直接调用这里，不再转出去。 */
+    void greet(String name, UUID id) {
         Settings s = settings;
-        if (s == null || !s.enabled() || !talkative(id) || !roll(s.joinGreet())) return;
+        if (s == null || !s.enabled() || !relay.leading() || !talkative(id) || !roll(s.joinGreet())) return;
         String key = name.toLowerCase(Locale.ROOT);
         synchronized (this) {
             String text = line("join_greet");
@@ -718,7 +790,9 @@ final class TestChat implements Listener {
      */
     boolean farewell(String name, UUID id, Runnable leave) {
         Settings s = settings;
-        if (s == null || !s.enabled() || !talkative(id) || !roll(s.farewell()) || realOnline() == 0) return false;
+        if (s == null || !s.enabled() || !talkative(id) || !roll(s.farewell())) return false;
+        if (!relay.leading()) return relay.farewell(name, id, leave);
+        if (realOnline() == 0) return false;
         String key = name.toLowerCase(Locale.ROOT);
         synchronized (this) {
             String text = line("farewell");
@@ -730,6 +804,24 @@ final class TestChat implements Listener {
                 String answer = fill(line("farewell_reply"), name, null);
                 if (other != null && answer != null) queue(other.key(), answer, GREET, System.currentTimeMillis() + between(500, 2000), null);
             });
+            return true;
+        }
+    }
+
+    /** 其他子服的测试假人要下线，请本服安排它说一声；说出口时它所在的子服让它下线。结果为是否排上了队。 */
+    boolean remoteFarewell(String name, UUID id) {
+        Settings s = settings;
+        if (s == null || !s.enabled() || !relay.leading() || realOnline() == 0) return false;
+        String key = name.toLowerCase(Locale.ROOT);
+        synchronized (this) {
+            String text = line("farewell");
+            if (text == null) return false;
+            queue(key, text, GREET, System.currentTimeMillis(), online -> {
+                if (!roll(s.answer())) return;
+                Speaker other = pick(online, System.currentTimeMillis(), Set.of(key));
+                String answer = fill(line("farewell_reply"), name, null);
+                if (other != null && answer != null) queue(other.key(), answer, GREET, System.currentTimeMillis() + between(500, 2000), null);
+            }, true);
             return true;
         }
     }

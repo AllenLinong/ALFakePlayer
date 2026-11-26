@@ -27,6 +27,7 @@ benchmark_chat_disabled: '&e测试假人聊天没有开启（tab_chat.yml 的 en
 benchmark_chat_status: '&a测试假人聊天：&f%mode%&a；排队 &f%queued%&a 句，最近 %window% 秒说了 &f%sent%/%capacity%&a 句；AI：&f%ai%'
 benchmark_chat_via_server: '走服务器聊天流程'
 benchmark_chat_via_format: '按 tab_chat.yml 的 format 发送'
+benchmark_chat_leader: '；跨服聊天由子服 %server% 安排'
 benchmark_ai_off: '未开启'
 benchmark_ai_today: '今天已用'
 benchmark_ai_last_error: '上次出错：'

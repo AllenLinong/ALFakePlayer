@@ -45,6 +45,8 @@ final class RemoteTab {
     private final Map<UUID, Shown> labels = new ConcurrentHashMap<>();
     /** 其他子服的测试条目：子服 ID → (UUID → 条目)，显示名在收到时就算好。 */
     private final Map<String, Map<UUID, Shown>> tests = new ConcurrentHashMap<>();
+    /** 其他子服的测试假人会不会说话（那个子服 tab_chat.yml 的 enabled）。 */
+    private final Map<String, Boolean> chatting = new ConcurrentHashMap<>();
 
     RemoteTab(DummyPlayers plugin) { this.plugin = plugin; }
 
@@ -52,11 +54,24 @@ final class RemoteTab {
     void label(UUID dummy, String name, String label) { labels.put(dummy, new Shown(name, label)); }
 
     /** 收到其他子服的测试条目（整份替换，空表示已清除）。值为 {档案名, 显示名 JSON}，显示名缺失时只显示名字。 */
-    void tests(String server, Map<UUID, String[]> entries) {
-        if (entries.isEmpty()) { tests.remove(server); return; }
+    void tests(String server, Map<UUID, String[]> entries, boolean chat) {
+        if (entries.isEmpty()) { tests.remove(server); chatting.remove(server); return; }
         Map<UUID, Shown> shown = new HashMap<>();
         entries.forEach((id, item) -> shown.put(id, new Shown(item[0], item[1] != null ? item[1] : JSON.serialize(Component.text(item[0])))));
+        chatting.put(server, chat);
         tests.put(server, Map.copyOf(shown));
+    }
+
+    /** 在线子服中会说话的测试条目：子服 → (UUID → 档案名)。 */
+    Map<String, Map<UUID, String>> chatHosts() {
+        var result = new HashMap<String, Map<UUID, String>>();
+        tests.forEach((server, entries) -> {
+            if (!online(server) || !chatting.getOrDefault(server, true)) return;
+            var names = new HashMap<UUID, String>();
+            entries.forEach((id, shown) -> names.put(id, shown.name()));
+            result.put(server, names);
+        });
+        return result;
     }
 
     /** 在线子服正在显示的测试条目名字（小写）。 */
