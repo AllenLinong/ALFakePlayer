@@ -18,6 +18,8 @@ interface Groups {
      * 只继承 group 这一个组，并加载在内存里。
      */
     CompletableFuture<Void> prepareUser(java.util.UUID id, String name, String group);
+    /** 已加载的 LuckPerms 用户对这个权限的设置；没有加载、没有设置或没装 LuckPerms 时为 null。 */
+    Boolean permission(java.util.UUID id, String node);
 
     Groups NONE = new Groups() {
         public CompletableFuture<Void> prepare(Roster.Entry entry, String group) { return CompletableFuture.completedFuture(null); }
@@ -25,6 +27,7 @@ interface Groups {
         public String prefix(Roster.Entry entry) { return ""; }
         public String groupPrefix(String group) { return ""; }
         public CompletableFuture<Void> prepareUser(java.util.UUID id, String name, String group) { return CompletableFuture.completedFuture(null); }
+        public Boolean permission(java.util.UUID id, String node) { return null; }
     };
 
     final class Luck implements Groups {
@@ -74,6 +77,16 @@ interface Groups {
                 user.setPrimaryGroup(group);
                 return api.getUserManager().saveUser(user);
             });
+        }
+
+        public Boolean permission(java.util.UUID id, String node) {
+            var user = api.getUserManager().getUser(id);
+            if (user == null) return null;
+            return switch (user.getCachedData().getPermissionData().checkPermission(node)) {
+                case TRUE -> true;
+                case FALSE -> false;
+                default -> null;
+            };
         }
 
         public String groupPrefix(String configured) {

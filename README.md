@@ -162,6 +162,11 @@ itemsadder: "namespace:item_id"     # ItemsAdder 物品
 修复
 
 - `tab_test.yml` 的 `groups` 用带点的组名（如 `lv.1`）时读取失败。
+- 装了 TrChat 等聊天插件时测试假人不说话：
+  - 代理频道（如 TrChat 的 `Global`）要通过发言人的连接转发给代理端，测试假人没有连接，消息发不出去；现在借一个在线真人的连接发出去。
+  - 频道的发言权限、格式条件现在按测试假人在 LuckPerms 里的权限组判断，和同组的真人一样；聊天格式里的 `%player_world%`、`%player_ping%` 等变量也有值了。
+  - 交给聊天插件后 2 秒内本服没有真人收到这句话时，改按 `tab_chat.yml` 的 `format` 发出，并在后台提示一次原因，不会再悄悄没了。
+  - 游戏里用 `/afp test say` 时报错（`AsyncPlayerChatEvent may only be triggered asynchronously`），之后所有测试假人的话都改成按 `format` 发，直到 `/afp reload`。
 - 其他插件处理假人的交互、挖掘、放置、钓鱼、进食事件时报错（例如 GuibindPro 的空指针，因为假人不触发进服事件），不再每挖一下刷一次屏，每个插件只在后台提示一次。
 
 升级须知

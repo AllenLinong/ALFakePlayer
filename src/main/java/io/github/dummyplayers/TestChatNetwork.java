@@ -107,8 +107,9 @@ final class TestChatNetwork {
 
     // ══ 生命周期 ══════════════════════════════════════════
 
+    /** 单服时也要看着聊天数据包：确认交给聊天插件的话真的发到了真人那里（见 {@link #delivered}）。 */
     void start() {
-        if (!enabled() || task != null) return;
+        if (task != null) return;
         Bukkit.getOnlinePlayers().forEach(this::watch);
         task = Bukkit.getAsyncScheduler().runAtFixedRate(plugin, unused -> tick(), 1, 1, TimeUnit.SECONDS);
     }
@@ -116,7 +117,7 @@ final class TestChatNetwork {
     void stop() {
         if (task != null) { task.cancel(); task = null; }
         // 告诉其他子服本服的真人都不在了：他们几秒内出现在别的子服时算换服
-        if (armed) broadcastPresence(Set.of());
+        if (armed && participating()) broadcastPresence(Set.of());
         armed = false;
         for (Player player : Bukkit.getOnlinePlayers()) unwatch(player);
         farewells.clear();
@@ -124,14 +125,15 @@ final class TestChatNetwork {
 
     private void tick() {
         long now = System.currentTimeMillis();
-        boolean active = participating() && (plugin.benchmark().count() > 0 || !plugin.remoteChatHosts().isEmpty());
-        armed = active;
-        if (active && (presenceChanged || now - lastPresence >= PRESENCE_MILLIS)) {
+        var settings = chat.settings();
+        boolean cross = participating() && (plugin.benchmark().count() > 0 || !plugin.remoteChatHosts().isEmpty());
+        armed = cross || settings != null && settings.enabled() && plugin.benchmark().count() > 0;
+        if (cross && (presenceChanged || now - lastPresence >= PRESENCE_MILLIS)) {
             presenceChanged = false;
             lastPresence = now;
             broadcastPresence(localReal());
         }
-        presence.entrySet().removeIf(entry -> now - entry.getValue().at() > PRESENCE_EXPIRE
+        if (enabled()) presence.entrySet().removeIf(entry -> now - entry.getValue().at() > PRESENCE_EXPIRE
             || !plugin.roster.online(entry.getKey(), plugin.network.settings.timeoutMillis()));
         gone.values().removeIf(at -> now - at > SWITCH_MILLIS);
         farewells.values().removeIf(pending -> now - pending.at() > 60_000);
@@ -178,8 +180,8 @@ final class TestChatNetwork {
     }
 
     void joined(Player player) {
-        if (!enabled()) return;
         watch(player);
+        if (!enabled()) return;
         presenceChanged = true;
     }
 
@@ -257,7 +259,7 @@ final class TestChatNetwork {
 
     /** 本服的测试假人说了一句：告诉其他子服，它们没收到聊天插件转发的就补发。manual 为 /afp test say。 */
     void said(String name, String group, String text, boolean viaChat, boolean manual) {
-        if (!armed) return;
+        if (!armed || !participating()) return;
         var body = new JsonObject();
         body.addProperty("name", name);
         body.addProperty("group", group);
@@ -344,8 +346,23 @@ final class TestChatNetwork {
 
     /** 聊天插件转发来的话可能比本插件的广播先到：MySQL 轮询时广播最多晚一个轮询间隔。 */
     private long lookback() {
+        if (!enabled()) return 3_000;
         var settings = plugin.network.settings;
         return (settings.redis() ? 0 : settings.pollMillis()) + 3_000;
+    }
+
+    /** 正在看着聊天数据包，而且本服有真人：这时才能确认话有没有发出去。 */
+    boolean watching() { return armed && !localReal().isEmpty(); }
+
+    /** since 之后有没有本服真人收到过 name 说的 text（不算本插件自己补发的）。 */
+    boolean delivered(String name, String text, long since) {
+        String normalName = normalize(name), normalText = normalize(text);
+        synchronized (seen) {
+            for (Seen entry : seen) {
+                if (entry.at() >= since && entry.text().contains(normalText) && entry.text().contains(normalName)) return true;
+            }
+        }
+        return false;
     }
 
     /** 按本服 tab_chat.yml 的 format 发给本服真人。 */

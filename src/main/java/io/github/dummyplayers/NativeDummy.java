@@ -57,6 +57,13 @@ final class NativeDummy extends ServerPlayer {
 
     static boolean claimIdentitySupported() { return BUKKIT_ENTITY != null; }
 
+    /** 把 handle 的 Bukkit 玩家对象换成 replacement，必须在第一次用到之前调用。结果为是否换成了。 */
+    static boolean useBukkitEntity(net.minecraft.server.level.ServerPlayer handle, org.bukkit.craftbukkit.entity.CraftPlayer replacement) {
+        if (BUKKIT_ENTITY == null || handle.getBukkitEntityRaw() != null) return false;
+        try { BUKKIT_ENTITY.set(handle, replacement); return true; }
+        catch (IllegalAccessException | RuntimeException error) { return false; }
+    }
+
     private static java.lang.reflect.Field bukkitEntityField() {
         try {
             var field = net.minecraft.world.entity.Entity.class.getDeclaredField("bukkitEntity");

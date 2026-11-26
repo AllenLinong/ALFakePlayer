@@ -227,6 +227,7 @@ final class TestChat implements Listener {
     /** 交给服务器聊天流程时用的测试假人对象（不在世界里、不在玩家列表里），按 UUID 缓存。 */
     private final Map<UUID, ServerPlayer> voices = new ConcurrentHashMap<>();
     private volatile long lastUserWarning;
+    private volatile boolean warnedUndelivered;
     private volatile boolean chatModeBroken;
     private volatile Boolean lastVoiceCancelled;
 
@@ -473,6 +474,8 @@ final class TestChat implements Listener {
         if (speaker == null) return;
         plugin.getLogger().info("[TAB test] " + speaker.name() + ": " + text);
         boolean viaChat = false;
+        // 聊天插件在聊天事件里就把话发出去了，要从交给它之前开始算
+        long since = System.currentTimeMillis();
         if (viaServerChat()) {
             try {
                 viaChat = chat(speaker, text);
@@ -481,13 +484,30 @@ final class TestChat implements Listener {
                 plugin.getLogger().log(Level.WARNING, "Could not send test player chat through the server chat; using tab_chat.yml format until /afp reload", error);
             }
         }
-        if (!viaChat) {
-            String line = settings.format().replace("%prefix%", plugin.groupPrefix(speaker.group())).replace("%name%", speaker.name())
-                .replace("%message%", text);
-            Component message = plugin.legacy(line);
-            for (Player player : Bukkit.getOnlinePlayers()) if (real(player)) player.sendMessage(message);
+        if (!viaChat) sendFormatted(speaker, text);
+        else if (relay.watching()) {
+            // 聊天插件可能悄悄没发出去（频道权限、发言条件、代理转发失败等）：2 秒内本服没有真人收到这句，改按 format 发
+            Bukkit.getAsyncScheduler().runDelayed(plugin, unused -> {
+                if (relay.delivered(speaker.name(), text, since)) return;
+                if (!warnedUndelivered) {
+                    warnedUndelivered = true;
+                    String chatPlugin = formattingPlugin();
+                    plugin.getLogger().warning("Test player chat handed to " + (chatPlugin == null ? "the server chat" : chatPlugin)
+                        + " did not reach any player within 2 seconds; sending such lines with the format in tab_chat.yml instead."
+                        + " Check that the chat plugin lets test players speak in its default channel, or set send_mode: format.");
+                }
+                sendFormatted(speaker, text);
+            }, 2, TimeUnit.SECONDS);
         }
         relay.said(speaker.name(), speaker.group(), text, viaChat, manual);
+    }
+
+    /** 按 tab_chat.yml 的 format 发给本服的真人。 */
+    private void sendFormatted(Speaker speaker, String text) {
+        String line = settings.format().replace("%prefix%", plugin.groupPrefix(speaker.group())).replace("%name%", speaker.name())
+            .replace("%message%", text);
+        Component message = plugin.legacy(line);
+        for (Player player : Bukkit.getOnlinePlayers()) if (real(player)) player.sendMessage(message);
     }
 
     /** 负责安排的子服让本服的测试假人说一句。它已经不在本服 TAB 中时不说。 */
@@ -516,8 +536,14 @@ final class TestChat implements Listener {
         prepareUser(speaker);
         ServerPlayer voice = voices.computeIfAbsent(speaker.id(), id -> {
             MinecraftServer server = MinecraftServer.getServer();
-            ServerLevel level = ((CraftWorld) Bukkit.getWorlds().getFirst()).getHandle();
-            return new ServerPlayer(server, level, new GameProfile(id, speaker.name()), ClientInformation.createDefault());
+            var world = Bukkit.getWorlds().getFirst();
+            ServerLevel level = ((CraftWorld) world).getHandle();
+            var created = new ServerPlayer(server, level, plugin.skins().profile(id, speaker.name()), ClientInformation.createDefault());
+            // 借真人连接发插件消息、按 LuckPerms 回答权限，见 VoicePlayer；站在主世界出生点（聊天插件的坐标、世界变量）
+            NativeDummy.useBukkitEntity(created, new VoicePlayer(plugin, server.server, created));
+            var spawn = world.getSpawnLocation();
+            created.setPos(spawn.getX(), spawn.getY(), spawn.getZ());
+            return created;
         });
         lastVoiceCancelled = null;
         new ChatProcessor(MinecraftServer.getServer(), voice, PlayerChatMessage.unsigned(speaker.id(), text), true).process();
@@ -555,7 +581,8 @@ final class TestChat implements Listener {
             spokeAt.put(speaker.key(), now);
             remember(new Said(speaker.name(), false, text, now));
         }
-        send(speaker, text, true);
+        // 指令在玩家或控制台所在的线程执行；聊天流程（AsyncPlayerChatEvent）只能在异步线程触发
+        Bukkit.getAsyncScheduler().runNow(plugin, unused -> send(speaker, text, true));
         return true;
     }
 
