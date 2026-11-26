@@ -11,11 +11,14 @@ interface Groups {
     CompletableFuture<Void> prepare(Roster.Entry entry, String group);
     CompletableFuture<Boolean> exists(String group);
     String prefix(Roster.Entry entry);
+    /** 权限组自身的前缀，用于 /afp test 的测试条目；组不存在或没有前缀时为空字符串。 */
+    String groupPrefix(String group);
 
     Groups NONE = new Groups() {
         public CompletableFuture<Void> prepare(Roster.Entry entry, String group) { return CompletableFuture.completedFuture(null); }
         public CompletableFuture<Boolean> exists(String group) { return CompletableFuture.completedFuture(true); }
         public String prefix(Roster.Entry entry) { return ""; }
+        public String groupPrefix(String group) { return ""; }
     };
 
     final class Luck implements Groups {
@@ -51,6 +54,12 @@ interface Groups {
                     return api.getUserManager().saveUser(user);
                 });
             });
+        }
+
+        public String groupPrefix(String configured) {
+            var group = api.getGroupManager().getGroup(normalize(configured));
+            String prefix = group == null ? null : group.getCachedData().getMetaData().getPrefix();
+            return prefix == null ? "" : prefix;
         }
 
         public String prefix(Roster.Entry entry) {

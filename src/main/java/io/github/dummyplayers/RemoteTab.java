@@ -51,11 +51,11 @@ final class RemoteTab {
     /** 收到其他子服广播的显示名。 */
     void label(UUID dummy, String name, String label) { labels.put(dummy, new Shown(name, label)); }
 
-    /** 收到其他子服的测试条目（整份替换，空表示已清除）。 */
-    void tests(String server, Map<UUID, String> entries) {
+    /** 收到其他子服的测试条目（整份替换，空表示已清除）。值为 {档案名, 显示名 JSON}，显示名缺失时只显示名字。 */
+    void tests(String server, Map<UUID, String[]> entries) {
         if (entries.isEmpty()) { tests.remove(server); return; }
         Map<UUID, Shown> shown = new HashMap<>();
-        entries.forEach((id, name) -> shown.put(id, new Shown(name, JSON.serialize(Component.text(name)))));
+        entries.forEach((id, item) -> shown.put(id, new Shown(item[0], item[1] != null ? item[1] : JSON.serialize(Component.text(item[0])))));
         tests.put(server, Map.copyOf(shown));
     }
 

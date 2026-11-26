@@ -30,7 +30,8 @@ config_version: 1
 #   Shift+右键：打开假人背包
 # action：page:previous 上一页 / page:next 下一页 / refresh 刷新 / new_dummy 打开购买确认 / close 关闭菜单 / none 无动作
 # 占位符：%current_page% 当前页、%total_pages% 总页数
-#         A 中可用 %name% 名字、%slot% 编号、%tier% 档位、%status% 状态
+#         A 中可用 %name% 名字、%slot% 编号、%tier% 档位、%status% 状态、
+#         %health% 生命（如 18.5/20）、%food% 饱食度（如 17/20）；假人不在本服运行时显示 states.yml 的 vitals_unavailable
 #         %purchase_cost% 单独占一行时显示购买价格（可多行）
 main:
   title: "&0我的假人"
@@ -53,6 +54,8 @@ main:
         - "&6▶ &8假人信息"
         - "&a▸&7档位：&f%tier%"
         - "&a▸&7状态：%status%"
+        - "&a▸&7生命：&c%health%"
+        - "&a▸&7饱食度：&6%food%"
         - ""
         - "&6▶ &8操作"
         - "&7•&a鼠标左键&a➤&f选择档位，或召回到身边（支持跨服）"

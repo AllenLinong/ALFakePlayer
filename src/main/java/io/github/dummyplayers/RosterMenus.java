@@ -58,7 +58,7 @@ final class RosterMenus implements Listener {
     private final DummyPlayers plugin;
     private final NamespacedKey actionKey, objectKey;
     private volatile Map<String, Layout> layouts;
-    private volatile String summoned, summonedRemote, notSummoned;
+    private volatile String summoned, summonedRemote, notSummoned, vitalsUnavailable;
 
     RosterMenus(DummyPlayers plugin, YamlConfiguration yaml) {
         this.plugin = plugin;
@@ -75,6 +75,7 @@ final class RosterMenus implements Listener {
         summoned = yaml.getString("states.summoned", "&a已召唤");
         summonedRemote = yaml.getString("states.summoned_remote", "&b在 %server% 运行");
         notSummoned = yaml.getString("states.not_summoned", "&7未召唤");
+        vitalsUnavailable = yaml.getString("states.vitals_unavailable", "&7—");
     }
 
     /** 关闭所有玩家打开的主菜单、档位选择、确认和购买物品菜单。 */
@@ -238,6 +239,9 @@ final class RosterMenus implements Listener {
         ItemStack stack = icon.item.create();
         var values = placeholders(plugin, page, pages, entry != null ? entry.key.slot() : slot, tier != null ? tier : entry == null ? null : entry.tier);
         values.put("status", status(entry));
+        float[] vitals = entry == null ? null : plugin.vitals(entry);
+        values.put("health", vitals == null ? vitalsUnavailable : number(vitals[0]) + "/" + number(vitals[1]));
+        values.put("food", vitals == null ? vitalsUnavailable : number(vitals[2]) + "/20");
         stack.editMeta(meta -> {
             meta.customName(text(icon.name, plugin, entry, values));
             var lore = new ArrayList<Component>();
@@ -255,6 +259,12 @@ final class RosterMenus implements Listener {
             if (entry != null) data.set(objectKey, PersistentDataType.STRING, entry.id.toString());
         });
         return stack;
+    }
+
+    /** 保留一位小数，整数不带小数点：20、18.5。 */
+    private static String number(float value) {
+        float rounded = Math.round(value * 10) / 10f;
+        return rounded == (int) rounded ? String.valueOf((int) rounded) : String.valueOf(rounded);
     }
 
     private String status(Roster.Entry entry) {
@@ -351,7 +361,10 @@ final class RosterMenus implements Listener {
                 plugin.requestTeleportFromMenu(player, entry.key.slot(), false);
             } else if (event.getClick() == ClickType.LEFT) {
                 openLater(player, () -> {
-                    if (plugin.summoned(entry) || plugin.roster.remoteHolder(entry) != null) openBringConfirm(player, entry, panel.page);
+                    // 本服禁止召唤时不打开等级选择和跨服召回确认；本服已召唤的假人仍可拉到身边
+                    boolean here = plugin.summoned(entry);
+                    if (!here && !plugin.summonAllowedHere(player)) { player.closeInventory(); return; }
+                    if (here || plugin.roster.remoteHolder(entry) != null) openBringConfirm(player, entry, panel.page);
                     else openTier(player, entry, entry.key.slot(), panel.page);
                 });
             }

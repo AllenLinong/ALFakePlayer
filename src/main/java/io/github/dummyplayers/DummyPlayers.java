@@ -35,6 +35,8 @@ import org.bukkit.event.entity.EntityTargetEvent;
 import org.bukkit.event.entity.PlayerDeathEvent;
 import org.bukkit.event.player.PlayerJoinEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
+import org.bukkit.event.server.PluginDisableEvent;
+import org.bukkit.event.server.PluginEnableEvent;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.persistence.PersistentDataType;
 import org.bukkit.potion.PotionEffect;
@@ -77,6 +79,11 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
     private volatile Map<DummyTier, Double> tierPrices = Map.of();
     private Groups groups = Groups.NONE;
     private volatile String luckPermsGroup = "default";
+
+    /** 与真实假人相同的 TAB 显示名：luckperms.group 权限组的前缀 + 名字。用于 /afp test 的测试条目。 */
+    Component testLabel(String name) {
+        return TEXT.deserialize(groups.groupPrefix(luckPermsGroup).replace('§', '&')).append(Component.text(name));
+    }
     private DummyNames names;
     private volatile PurchasePrice purchasePrice;
     private FoliaBridge folia;
@@ -173,6 +180,10 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
             Objects.requireNonNull(getCommand("alfakeplayer")).setExecutor(this);
             Objects.requireNonNull(getCommand("alfakeplayer")).setTabCompleter(this);
             Bukkit.getPluginManager().registerEvents(this, this);
+            if (!NativeDummy.claimIdentitySupported()) {
+                getLogger().warning("This server build does not allow replacing the fake player's Bukkit object;"
+                    + " claim plugins (claims.plugins) will treat fake players as separate players.");
+            }
             Bukkit.getOnlinePlayers().forEach(benchmark::join);
             Bukkit.getPluginManager().registerEvents(menus, this);
             Bukkit.getPluginManager().registerEvents(rosterMenus, this);
@@ -238,7 +249,7 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
         if (!Double.isFinite(coins) || coins < 0 || points < 0) {
             throw new IllegalArgumentException("config.yml: purchase.coins and purchase.points must be zero or positive");
         }
-        int activeMax = option(config, "slots.max_active_server", 20, 1, 200);
+        int activeMax = option(config, "slots.max_active_server", 20, 0, 200);
         var radius = new EnumMap<DummyTier, Integer>(DummyTier.class);
         var prices = new EnumMap<DummyTier, Double>(DummyTier.class);
         for (DummyTier tier : DummyTier.values()) {
@@ -271,6 +282,7 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
         int teleportDelay = option(config, "teleport.to_dummy_delay_seconds", 5, 0, 300);
         int teleportCooldown = option(config, "teleport.to_dummy_cooldown_seconds", 5, 0, 300);
         String group = config.getString("luckperms.group", "default");
+        List<String> claimPlugins = List.copyOf(config.getStringList("claims.plugins"));
         return () -> {
             if (menus == null) {
                 menus = new Menus(this, menuConfig);
@@ -306,6 +318,7 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
             paidSummoning = paid;
             teleports.configure(teleportDelay, teleportCooldown);
             luckPermsGroup = group;
+            ClaimIdentity.configure(claimPlugins);
         };
     }
 
@@ -349,6 +362,13 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
 
     boolean summoned(Roster.Entry entry) {
         return isSummoned(live.get(entry.id));
+    }
+
+    /** 主菜单显示用：本服运行中假人的 {生命, 生命上限, 饱食度}；不在本服运行时为 null。只读数值，任意线程可调用。 */
+    float[] vitals(Roster.Entry entry) {
+        Live active = live.get(entry.id);
+        if (!isSummoned(active)) return null;
+        return new float[] {active.dummy.getHealth(), active.dummy.getMaxHealth(), active.dummy.getFoodData().getFoodLevel()};
     }
 
     private static boolean isSummoned(Live active) {
@@ -549,6 +569,7 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
             if (live.containsKey(entry.id) || pending.contains(entry.id)) { msg(owner, "already_live"); return; }
             String remote = roster.remoteHolder(entry);
             if (remote != null) { msg(owner, "remote_live", "server", serverLabel(remote), "slot", slot); return; }
+            if (!summonAllowedHere(owner)) return;
             if (live.size() + pending.size() >= maxActive) { msg(owner, "server_limit"); return; }
             selectedTier = requestedTier == null ? entry.tier : requestedTier;
             pending.add(entry.id);
@@ -565,6 +586,7 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
             if (Bukkit.isStopping() || !isEnabled()) return;
             if (reloading) { msg(player, "reload_busy"); return; }
             if (live.containsKey(entry.id) || pending.contains(entry.id)) { msg(player, "already_live"); return; }
+            if (!summonAllowedHere(player)) return;
             if (live.size() + pending.size() >= maxActive) { msg(player, "server_limit"); return; }
             pending.add(entry.id);
         }
@@ -614,6 +636,13 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
                 }, cancel, 1);
                 if (!queued) cancel.run();
             });
+    }
+
+    /** slots.max_active_server 为 0 时本服禁止召唤，也不能把其他子服的假人召回本服。 */
+    boolean summonAllowedHere(Player player) {
+        if (maxActive > 0) return true;
+        msg(player, "summon_disabled");
+        return false;
     }
 
     private void clearPending(Roster.Entry entry) {
@@ -709,7 +738,10 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
         MinecraftServer server = ((CraftServer) Bukkit.getServer()).getServer();
         var level = ((CraftWorld) position.getWorld()).getHandle();
         GameProfile profile = new GameProfile(entry.id, nativeName);
-        NativeDummy dummy = new NativeDummy(server, level, profile, ignoreHostileMobs, entry);
+        // 领地插件按主人判断假人的权限时使用主人的名字（见 ClaimIdentity）
+        Player ownerOnline = Bukkit.getPlayer(entry.key.owner());
+        String ownerName = ownerOnline != null ? ownerOnline.getName() : Bukkit.getOfflinePlayer(entry.key.owner()).getName();
+        NativeDummy dummy = new NativeDummy(server, level, profile, ignoreHostileMobs, entry, ownerName);
         dummy.setShiftKeyDown(entry.sneaking);
         Live active = new Live(entry, dummy);
         live.put(entry.id, active);
@@ -775,10 +807,11 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
     private void shareTests(String to) {
         if (network == null || !network.enabled()) return;
         var entries = new com.google.gson.JsonArray();
-        benchmark.entries().forEach((id, name) -> {
+        benchmark.entries().forEach((id, shown) -> {
             var item = new JsonObject();
             item.addProperty("id", id.toString());
-            item.addProperty("name", name);
+            item.addProperty("name", shown.name());
+            item.addProperty("label", RemoteTab.JSON.serialize(shown.label()));
             entries.add(item);
         });
         var body = new JsonObject();
@@ -1014,10 +1047,11 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
                 if (benchmark.count() > 0) shareTests(from);
             }
             case "tab_test" -> {
-                Map<UUID, String> entries = new LinkedHashMap<>();
+                Map<UUID, String[]> entries = new LinkedHashMap<>();
                 for (var element : body.getAsJsonArray("entries")) {
                     JsonObject item = element.getAsJsonObject();
-                    entries.put(uuid(item, "id"), item.get("name").getAsString());
+                    String name = item.get("name").getAsString();
+                    entries.put(uuid(item, "id"), new String[] {name, item.has("label") ? item.get("label").getAsString() : null});
                 }
                 remoteTab.tests(from, entries);
             }
@@ -1166,6 +1200,10 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
             if (live.get(active.entry.id) == active) unlink(active, true);
         }, null, 1);
     }
+
+    /** 领地插件在本插件之后启用、或被单独重载时，重新登记它的类加载器。 */
+    @EventHandler public void onPluginEnable(PluginEnableEvent event) { ClaimIdentity.refresh(null); }
+    @EventHandler public void onPluginDisable(PluginDisableEvent event) { ClaimIdentity.refresh(event.getPlugin()); }
 
     @EventHandler(priority = EventPriority.MONITOR) public void onJoin(PlayerJoinEvent event) {
         Player player = event.getPlayer();
@@ -1850,7 +1888,8 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
             Runnable respawn = () -> {
                 boolean ours = parked.remove(entry.id, state), spawned = false;
                 try {
-                    if (ours && !Bukkit.isStopping() && roster.entries.get(entry.key) == entry && roster.holds(entry)) {
+                    // 重载后本服禁止召唤（max_active_server 改为 0）时不再召唤回来，背包已经保存
+                    if (ours && !Bukkit.isStopping() && maxActive > 0 && roster.entries.get(entry.key) == entry && roster.holds(entry)) {
                         resume(spawn(entry, state.position), state);
                         roster.save();
                         spawned = true;

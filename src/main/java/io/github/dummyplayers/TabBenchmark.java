@@ -1,6 +1,8 @@
 package io.github.dummyplayers;
 
 import com.mojang.authlib.GameProfile;
+import io.papermc.paper.adventure.PaperAdventure;
+import net.kyori.adventure.text.Component;
 import net.minecraft.network.protocol.game.ClientboundPlayerInfoRemovePacket;
 import net.minecraft.network.protocol.game.ClientboundPlayerInfoUpdatePacket;
 import net.minecraft.network.protocol.game.ClientboundPlayerInfoUpdatePacket.Action;
@@ -27,11 +29,14 @@ import java.util.UUID;
 
 final class TabBenchmark {
     static final int MAX_ENTRIES = 80;
+    /** 测试条目：游戏档案名，以及和真实假人一样的 TAB 显示名（权限组前缀 + 名字）。 */
+    record Shown(String name, Component label) { }
+
     private final DummyPlayers plugin;
     private final Map<UUID, ServerGamePacketListenerImpl> viewers = new HashMap<>();
     private List<UUID> ids = List.of();
-    /** 当前的测试条目：UUID → 名字，按添加顺序。跨服时广播给其他子服显示。 */
-    private Map<UUID, String> names = Map.of();
+    /** 当前的测试条目：UUID → 名字和显示名，按添加顺序。跨服时广播给其他子服显示。 */
+    private Map<UUID, Shown> names = Map.of();
     private ClientboundPlayerInfoUpdatePacket entries;
 
     TabBenchmark(DummyPlayers plugin) { this.plugin = plugin; }
@@ -60,7 +65,7 @@ final class TabBenchmark {
     private synchronized void replace(int count, Set<String> occupied) {
         var batch = new ArrayList<Entry>(count);
         var newIds = new ArrayList<UUID>(count);
-        var newNames = new LinkedHashMap<UUID, String>();
+        var newNames = new LinkedHashMap<UUID, Shown>();
         for (int index = 0; index < count; index++) {
             UUID id;
             String name;
@@ -69,22 +74,23 @@ final class TabBenchmark {
                 name = Roster.Entry.defaultName(id);
             } while (!occupied.add(name.toLowerCase(Locale.ROOT)));
             var profile = new GameProfile(id, name);
-            batch.add(new Entry(id, profile, true, 0, GameType.SURVIVAL, null, true, 0, null));
+            Component label = plugin.testLabel(name);
+            batch.add(new Entry(id, profile, true, 0, GameType.SURVIVAL, PaperAdventure.asVanilla(label), true, 0, null));
             newIds.add(id);
-            newNames.put(id, name);
+            newNames.put(id, new Shown(name, label));
         }
         clear();
         ids = List.copyOf(newIds);
         names = Collections.unmodifiableMap(newNames);
         entries = new ClientboundPlayerInfoUpdatePacket(EnumSet.of(Action.ADD_PLAYER, Action.UPDATE_LISTED,
-            Action.UPDATE_GAME_MODE, Action.UPDATE_LATENCY, Action.UPDATE_HAT), List.copyOf(batch));
+            Action.UPDATE_GAME_MODE, Action.UPDATE_LATENCY, Action.UPDATE_DISPLAY_NAME, Action.UPDATE_HAT), List.copyOf(batch));
         send(entries);
     }
 
     synchronized int count() { return ids.size(); }
 
     /** 当前测试条目（UUID → 名字）的快照。 */
-    synchronized Map<UUID, String> entries() { return names; }
+    synchronized Map<UUID, Shown> entries() { return names; }
 
     synchronized void join(Player player) {
         if (!(player instanceof CraftPlayer viewer) || viewer.getHandle() instanceof NativeDummy) return;

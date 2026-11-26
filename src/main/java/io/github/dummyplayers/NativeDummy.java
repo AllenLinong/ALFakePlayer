@@ -36,10 +36,30 @@ final class NativeDummy extends ServerPlayer {
     private int lastChunkZ = Integer.MIN_VALUE;
     final SinkLink link = new SinkLink();
 
-    NativeDummy(MinecraftServer server, ServerLevel level, GameProfile profile, boolean ignoredByHostileMobs, Roster.Entry entry) {
+    /** Entity.bukkitEntity：在第一次使用前换成 DummyCraftPlayer。找不到时领地兼容不可用，假人照常工作。 */
+    private static final java.lang.reflect.Field BUKKIT_ENTITY = bukkitEntityField();
+
+    NativeDummy(MinecraftServer server, ServerLevel level, GameProfile profile, boolean ignoredByHostileMobs,
+                Roster.Entry entry, String ownerName) {
         super(server, level, profile, ClientInformation.createDefault());
         this.ignoredByHostileMobs = ignoredByHostileMobs;
         this.entry = entry;
+        if (entry != null && BUKKIT_ENTITY != null && getBukkitEntityRaw() == null) {
+            try { BUKKIT_ENTITY.set(this, new DummyCraftPlayer(server.server, this, entry.key.owner(), ownerName)); }
+            catch (IllegalAccessException | RuntimeException ignored) { }
+        }
+    }
+
+    static boolean claimIdentitySupported() { return BUKKIT_ENTITY != null; }
+
+    private static java.lang.reflect.Field bukkitEntityField() {
+        try {
+            var field = net.minecraft.world.entity.Entity.class.getDeclaredField("bukkitEntity");
+            field.setAccessible(true);
+            return field;
+        } catch (ReflectiveOperationException | RuntimeException error) {
+            return null;
+        }
     }
 
     @Override public boolean isPushable() { return (entry == null || entry.pushable) && super.isPushable(); }
