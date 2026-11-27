@@ -19,10 +19,19 @@ import java.util.Set;
  *   <li>聊天插件按权限判断能不能在频道发言、用哪个格式。测试假人没有登录，LuckPerms 没有接管它的权限；
  *       这里按它在 LuckPerms 里的用户（和档案同一个权限组）回答。</li>
  *   <li>PlaceholderAPI 的变量（如 %player_world%）只对在线玩家有值，这里报告为在线，聊天格式里的变量和真人一样。</li>
+ *   <li>聊天插件的防刷屏（和上一句太像、发言冷却、发言太频繁）会悄悄吞掉测试假人的话，它们说话的频率由 tab_chat.yml 控制，
+ *       这里给它们这几项的绕过权限（LuckPerms 里明确设为 false 的除外）。</li>
+ *   <li>聊天插件不让它说话时会发一句提示给它（如“你没有权限在此频道发言”），这里记下来，发不出去时在后台提示原因。</li>
  * </ul>
  */
 final class VoicePlayer extends CraftPlayer {
+    /** 防刷屏的绕过权限：TrChat 的相似消息、重复短语、发言冷却、发言频率、消息长度。 */
+    private static final Set<String> BYPASS = Set.of("trchat.bypass.repeat", "trchat.bypass.duplicate", "trchat.bypass.chatcd",
+        "trchat.bypass.highfrequency", "trchat.bypass.chatlength");
     private final DummyPlayers plugin;
+    /** 聊天插件最近一次发给它的提示和时间。 */
+    private volatile String notice = "";
+    private volatile long noticeAt;
 
     VoicePlayer(DummyPlayers plugin, CraftServer server, ServerPlayer handle) {
         super(server, handle);
@@ -53,12 +62,68 @@ final class VoicePlayer extends CraftPlayer {
 
     @Override public boolean hasPermission(String name) {
         Boolean value = plugin.groups().permission(getUniqueId(), name);
-        return value != null ? value : super.hasPermission(name);
+        return value != null ? value : BYPASS.contains(name) || super.hasPermission(name);
     }
 
     @Override public boolean hasPermission(Permission permission) {
         Boolean value = plugin.groups().permission(getUniqueId(), permission.getName());
-        return value != null ? value : super.hasPermission(permission);
+        return value != null ? value : BYPASS.contains(permission.getName()) || super.hasPermission(permission);
+    }
+
+    /** since 之后聊天插件发给它的提示（去掉颜色）；没有时为空字符串。 */
+    String noticeSince(long since) { return noticeAt >= since ? notice : ""; }
+
+    private void notice(String text) {
+        String plain = TestAi.clean(text, 120);
+        if (plain.isEmpty()) return;
+        notice = plain;
+        noticeAt = System.currentTimeMillis();
+    }
+
+    @Override public void sendRawMessage(java.util.UUID sender, String message) { if (message != null) notice(message); }
+
+    // TrChat 等用动作栏提示“没有这个频道的说话权限”
+    @Override public void sendActionBar(String message) { if (message != null) notice(message); }
+
+    @Override public void sendActionBar(net.kyori.adventure.text.Component message) {
+        notice(net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer.plainText().serialize(message));
+    }
+
+    @SuppressWarnings("deprecation")
+    @Override public void sendActionBar(net.md_5.bungee.api.chat.BaseComponent... message) {
+        notice(net.md_5.bungee.api.chat.BaseComponent.toLegacyText(message));
+    }
+
+    /** 记下通过 spigot() 发来的提示（TabooLib 的动作栏就是这样发的），其余照常。 */
+    @SuppressWarnings("deprecation")
+    private final Player.Spigot spigot = new Player.Spigot() {
+        @Override public void sendMessage(net.md_5.bungee.api.chat.BaseComponent component) { notice(component.toLegacyText()); }
+        @Override public void sendMessage(net.md_5.bungee.api.chat.BaseComponent... components) {
+            notice(net.md_5.bungee.api.chat.BaseComponent.toLegacyText(components));
+        }
+        @Override public void sendMessage(java.util.UUID sender, net.md_5.bungee.api.chat.BaseComponent... components) { sendMessage(components); }
+        @Override public void sendMessage(net.md_5.bungee.api.ChatMessageType position, net.md_5.bungee.api.chat.BaseComponent component) {
+            notice(component.toLegacyText());
+        }
+        @Override public void sendMessage(net.md_5.bungee.api.ChatMessageType position, net.md_5.bungee.api.chat.BaseComponent... components) {
+            sendMessage(components);
+        }
+        @Override public void sendMessage(net.md_5.bungee.api.ChatMessageType position, java.util.UUID sender,
+                                          net.md_5.bungee.api.chat.BaseComponent... components) { sendMessage(components); }
+        @Override public int getPing() { return VoicePlayer.this.getPing(); }
+        @Override public java.util.Set<Player> getHiddenPlayers() { return java.util.Set.of(); }
+    };
+
+    @Override public Player.Spigot spigot() { return spigot; }
+
+    @SuppressWarnings("removal")
+    @Override public void sendMessage(net.kyori.adventure.identity.Identity identity, net.kyori.adventure.text.Component message,
+                                      net.kyori.adventure.audience.MessageType type) {
+        notice(net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer.plainText().serialize(message));
+    }
+
+    @Override public void sendMessage(net.kyori.adventure.text.Component message, net.kyori.adventure.chat.ChatType.Bound boundChatType) {
+        notice(net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer.plainText().serialize(message));
     }
 
     @Override public boolean isPermissionSet(String name) {

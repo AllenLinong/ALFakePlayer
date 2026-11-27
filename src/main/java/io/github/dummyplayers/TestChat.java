@@ -72,7 +72,7 @@ final class TestChat implements Listener {
                     int burstChance, int burstMin, int burstMax, long burstGapMin, long burstGapMax,
                     int welcome, long welcomeCooldown, int joinGreet, int farewell, int answer, int mention, int followUp, int question,
                     List<Keyword> ignore, List<Rule> rules, Map<String, List<String>> lines, List<List<Step>> dialogues,
-                    TestAi.Settings ai, boolean crossServer, String forwarded) {
+                    TestAi.Settings ai, boolean crossServer, String forwarded, Map<String, Integer> channels, TestTeams.Settings teams) {
 
         static Settings read(ConfigurationSection yaml) {
             String mode = yaml.getString("send_mode", "auto").strip().toLowerCase(Locale.ROOT);
@@ -103,23 +103,15 @@ final class TestChat implements Listener {
             var lines = new HashMap<String, List<String>>();
             ConfigurationSection pools = yaml.getConfigurationSection("lines");
             if (pools != null) for (String key : pools.getKeys(false)) lines.put(key, List.copyOf(pools.getStringList(key)));
-            var dialogues = new ArrayList<List<Step>>();
-            index = 0;
-            for (Object raw : yaml.getList("dialogues", List.of())) {
-                String where = "tab_chat.yml: dialogues[" + index++ + "]";
-                if (!(raw instanceof List<?> list) || list.isEmpty()) throw new IllegalArgumentException(where + " must be a list of lines");
-                var steps = new ArrayList<Step>();
-                for (Object item : list) {
-                    String text = String.valueOf(item).strip();
-                    if (text.length() < 3 || text.charAt(1) != ':' || "ABC".indexOf(Character.toUpperCase(text.charAt(0))) < 0) {
-                        throw new IllegalArgumentException(where + ": each line must start with A:, B: or C: (" + text + ")");
-                    }
-                    var texts = new ArrayList<String>();
-                    for (String option : text.substring(2).split("\\|")) if (!option.isBlank()) texts.add(option.strip());
-                    if (texts.isEmpty()) throw new IllegalArgumentException(where + ": empty line " + text);
-                    steps.add(new Step("ABC".indexOf(Character.toUpperCase(text.charAt(0))), List.copyOf(texts)));
-                }
-                dialogues.add(List.copyOf(steps));
+            var dialogues = dialogues(yaml.getList("dialogues", List.of()), "tab_chat.yml: dialogues");
+            // 频道 → 比例；频道名可能带点，取所有叶子键
+            var channels = new LinkedHashMap<String, Integer>();
+            ConfigurationSection channelSection = yaml.getConfigurationSection("channels");
+            if (channelSection != null) for (String channel : channelSection.getKeys(true)) {
+                if (channelSection.isConfigurationSection(channel)) continue;
+                int weight = channelSection.getInt(channel, -1);
+                if (weight < 1) throw new IllegalArgumentException("tab_chat.yml: channels." + channel + " must be a positive whole number");
+                channels.merge(channel.strip(), weight, Integer::sum);
             }
             String forwarded = String.valueOf(yaml.get("cross_server.forwarded", "auto")).strip().toLowerCase(Locale.ROOT);
             if (!Set.of("auto", "true", "false").contains(forwarded)) {
@@ -145,7 +137,31 @@ final class TestChat implements Listener {
                 percent(chances.get("answer"), 50, "chances.answer"), percent(chances.get("mention"), 90, "chances.mention"),
                 percent(chances.get("follow_up"), 45, "chances.follow_up"), percent(chances.get("question"), 25, "chances.question"),
                 keywords(yaml.get("ignore_keywords"), "tab_chat.yml: ignore_keywords"), List.copyOf(rules), Map.copyOf(lines),
-                List.copyOf(dialogues), TestAi.Settings.read(section(yaml, "ai")), yaml.getBoolean("cross_server.enabled", true), forwarded);
+                dialogues, TestAi.Settings.read(section(yaml, "ai")), yaml.getBoolean("cross_server.enabled", true), forwarded,
+                Collections.unmodifiableMap(channels), TestTeams.Settings.read(section(yaml, "teams")));
+        }
+
+        /** 冷场对话：每段是几行 "A: 说法1|说法2"，A B C 表示由谁说。 */
+        static List<List<Step>> dialogues(List<?> all, String where) {
+            var dialogues = new ArrayList<List<Step>>();
+            int index = 0;
+            for (Object raw : all) {
+                String at = where + "[" + index++ + "]";
+                if (!(raw instanceof List<?> list) || list.isEmpty()) throw new IllegalArgumentException(at + " must be a list of lines");
+                var steps = new ArrayList<Step>();
+                for (Object item : list) {
+                    String text = String.valueOf(item).strip();
+                    if (text.length() < 3 || text.charAt(1) != ':' || "ABC".indexOf(Character.toUpperCase(text.charAt(0))) < 0) {
+                        throw new IllegalArgumentException(at + ": each line must start with A:, B: or C: (" + text + ")");
+                    }
+                    var texts = new ArrayList<String>();
+                    for (String option : text.substring(2).split("\\|")) if (!option.isBlank()) texts.add(option.strip());
+                    if (texts.isEmpty()) throw new IllegalArgumentException(at + ": empty line " + text);
+                    steps.add(new Step("ABC".indexOf(Character.toUpperCase(text.charAt(0))), List.copyOf(texts)));
+                }
+                dialogues.add(List.copyOf(steps));
+            }
+            return List.copyOf(dialogues);
         }
 
         private static ConfigurationSection section(ConfigurationSection yaml, String path) {
@@ -216,8 +232,10 @@ final class TestChat implements Listener {
         }
     }
 
-    /** 在线的测试假人：key 为小写名字；server 为它所在的其他子服，在本服时为 null（这时才有 group）。 */
-    record Speaker(String key, String name, UUID id, String group, boolean talkative, String persona, String server) { }
+    /** 在线的测试假人：key 为小写名字；server 为它所在的其他子服，在本服时为 null（这时才有 group）；team 为小队，不在小队里时为空。 */
+    record Speaker(String key, String name, UUID id, String group, boolean talkative, String persona, String server, String team) {
+        boolean teammate(Speaker other) { return !team.isEmpty() && team.equals(other.team) && !key.equals(other.key); }
+    }
 
     /** 聊天记录中的一条。 */
     record Said(String name, boolean real, String text, long at) { }
@@ -240,6 +258,15 @@ final class TestChat implements Listener {
     private final ArrayDeque<Long> sent = new ArrayDeque<>();
     private final ArrayDeque<Said> history = new ArrayDeque<>();
     private final ArrayDeque<String> recentTexts = new ArrayDeque<>();
+    /** 测试假人最近说过的话（给 AI 看，免得重复）。 */
+    private final ArrayDeque<Said> spoken = new ArrayDeque<>();
+    /** 最近给过 AI 的话题方向、最近用过的冷场对话，尽量不重复。 */
+    private final ArrayDeque<String> recentTopics = new ArrayDeque<>();
+    private final ArrayDeque<List<Step>> recentDialogues = new ArrayDeque<>();
+    /** 小队上一次内部聊天的时间。 */
+    private final Map<String, Long> teamChatAt = new HashMap<>();
+    /** 上一次定时器看到的在线测试假人；在 TabBenchmark 的锁里（不能调用 online()）判断队友在不在线时用。 */
+    private volatile Map<String, Speaker> lastOnline = Map.of();
     private final Map<String, Long> spokeAt = new HashMap<>();
     private final Map<String, Long> ruleAt = new HashMap<>();
     private final Map<UUID, Partner> partners = new HashMap<>();
@@ -253,8 +280,11 @@ final class TestChat implements Listener {
     private ScheduledTask task;
     /** 交给服务器聊天流程时用的测试假人对象（不在世界里、不在玩家列表里），按 UUID 缓存。 */
     private final Map<UUID, ServerPlayer> voices = new ConcurrentHashMap<>();
-    private volatile long lastUserWarning;
+    private volatile long lastUserWarning, lastChannelWarning;
+    private volatile String lastChannelProblem = "";
     private volatile boolean warnedUndelivered;
+    private volatile String lastNotice = "";
+    private volatile long lastNoticeWarning;
     private volatile boolean chatModeBroken;
     private volatile Boolean lastVoiceCancelled;
 
@@ -362,7 +392,8 @@ final class TestChat implements Listener {
         result.putAll(local());
         relay.remoteHosts().forEach((server, entries) -> entries.forEach((id, name) -> {
             String key = name.toLowerCase(Locale.ROOT);
-            result.putIfAbsent(key, new Speaker(key, name, id, "", talkative(id), persona(id), server));
+            var profile = plugin.testProfiles().profile(name);
+            result.putIfAbsent(key, new Speaker(key, name, id, "", talkative(id), persona(id), server, team(profile)));
         }));
         return result;
     }
@@ -375,9 +406,16 @@ final class TestChat implements Listener {
             var profile = plugin.testProfiles().profile(shown.name());
             if (profile == null) continue;
             String key = profile.name().toLowerCase(Locale.ROOT);
-            result.put(key, new Speaker(key, profile.name(), profile.id(), profile.group(), talkative(profile.id()), persona(profile.id()), null));
+            result.put(key, new Speaker(key, profile.name(), profile.id(), profile.group(), talkative(profile.id()), persona(profile.id()), null,
+                team(profile)));
         }
         return result;
+    }
+
+    /** 档案里的小队；teams 关闭时当作不在小队里（档案里的小队留着，重新开启后照旧）。 */
+    private String team(Roster.TestProfile profile) {
+        Settings s = settings;
+        return profile == null || s == null || !s.teams().enabled() ? "" : profile.team();
     }
 
     /** 由 UUID 决定的 0–99 的固定数，salt 不同得到不同的特征。 */
@@ -395,6 +433,20 @@ final class TestChat implements Listener {
         return personas.isEmpty() ? "" : personas.get(trait(id, 2) % personas.size());
     }
 
+    /** 测试假人在聊天插件里说话的频道（tab_chat.yml 的 channels，按比例由 UUID 固定分配）；没设置时为 null。 */
+    String channel(UUID id) {
+        Settings s = settings;
+        if (s == null || s.channels().isEmpty()) return null;
+        int total = 0;
+        for (int weight : s.channels().values()) total += weight;
+        int pick = (int) Math.floorMod((long) trait(id, 11) * 7919 + trait(id, 12), (long) total);
+        for (var entry : s.channels().entrySet()) {
+            pick -= entry.getValue();
+            if (pick < 0) return entry.getKey();
+        }
+        return null;
+    }
+
     /** 测试假人现在在游戏里做什么（给 AI 看）：每人每 30～60 分钟换一件，由 UUID 和时间算出，不用存。 */
     String activity(UUID id) {
         Settings s = settings;
@@ -407,12 +459,38 @@ final class TestChat implements Listener {
         return activities.get((int) Math.floorMod(mixed * 0xBF58476D1CE4E5B9L >>> 17, (long) activities.size()));
     }
 
+    /** 打字习惯（给 AI 看），按 UUID 固定。 */
+    static String habit(UUID id) { return TestAi.HABITS.get(trait(id, 13) % TestAi.HABITS.size()); }
+
+    /** 心情（给 AI 看）：每人每 20～40 分钟换一种。 */
+    static String mood(UUID id) {
+        long period = 20 + trait(id, 14) % 21;
+        long bucket = (System.currentTimeMillis() / 60_000 + trait(id, 15)) / period;
+        long mixed = (id.getLeastSignificantBits() ^ id.getMostSignificantBits() >>> 7) + bucket * 0xBF58476D1CE4E5B9L;
+        mixed ^= mixed >>> 29;
+        return TestAi.MOODS.get((int) Math.floorMod(mixed * 0x94D049BB133111EBL >>> 13, (long) TestAi.MOODS.size()));
+    }
+
+    /** 给 AI 看的一个测试假人。小队一栏写上小队名、在线的队友和小队最近在做的事。 */
+    private TestAi.Candidate candidate(Speaker speaker, String note, Map<String, Speaker> online) {
+        String team = "";
+        if (!speaker.team().isEmpty()) {
+            var mates = new ArrayList<String>();
+            for (Speaker other : online.values()) if (speaker.teammate(other)) mates.add(other.name());
+            String project = TestTeams.project(speaker.team(), settings.teams().projects());
+            team = speaker.team() + "，" + (mates.isEmpty() ? "队友都不在线" : "在线的队友：" + String.join("、", mates))
+                + (project.isEmpty() ? "" : "，小队最近在" + project);
+        }
+        return new TestAi.Candidate(speaker.name(), speaker.persona(), habit(speaker.id()), mood(speaker.id()), activity(speaker.id()), team, note);
+    }
+
     // ══ 定时器 ════════════════════════════════════════════
 
     private void tick() {
         Settings s = settings;
         if (s == null) return;
         Map<String, Speaker> online = online();
+        lastOnline = online;
         int real = realOnline();
         Line deliver = null;
         Runnable idleCall = null;
@@ -447,7 +525,9 @@ final class TestChat implements Listener {
             }
             if (real > 0 && pending.isEmpty() && !idleBusy && now >= nextIdle) {
                 nextIdle = now + quiet(real);
-                if (!(s.dontInterrupt() && realTalking(now))) idleCall = startIdle(online, now, real);
+                // 冷场闲聊的名额已经用完时不开话题，免得 AI 白白生成说不出去的话
+                boolean room = sent.size() < Math.max(1, (capacity(real, now) + 1) / 2);
+                if (room && !(s.dontInterrupt() && realTalking(now))) idleCall = startIdle(online, now, real);
             }
             if (real == 0) nextIdle = Math.max(nextIdle, now + s.quietMin());
         }
@@ -504,14 +584,21 @@ final class TestChat implements Listener {
         spokeAt.put(line.speaker(), now);
         lastSpeaker = line.speaker();
         remember(new Said(name, false, line.text(), now));
-        recentTexts.addLast(line.text());
-        while (recentTexts.size() > 40) recentTexts.pollFirst();
+        spoke(new Said(name, false, line.text(), now));
         if (question(line.text().toLowerCase(Locale.ROOT)) && line.priority() == IDLE) { asker = line.speaker(); askUntil = now + 40_000; }
     }
 
     private void remember(Said said) {
         history.addLast(said);
         while (history.size() > 40) history.pollFirst();
+    }
+
+    /** 记下测试假人说过的一句：挑语料、过滤 AI 的话时避开，也告诉 AI 别再说。 */
+    private void spoke(Said said) {
+        recentTexts.addLast(said.text());
+        while (recentTexts.size() > 40) recentTexts.pollFirst();
+        spoken.addLast(said);
+        while (spoken.size() > 40) spoken.pollFirst();
     }
 
     // ══ 发送 ══════════════════════════════════════════════
@@ -536,12 +623,20 @@ final class TestChat implements Listener {
             // 聊天插件可能悄悄没发出去（频道权限、发言条件、代理转发失败等）：2 秒内本服没有真人收到这句，改按 format 发
             Bukkit.getAsyncScheduler().runDelayed(plugin, unused -> {
                 if (relay.delivered(speaker.name(), text, since)) return;
-                if (!warnedUndelivered) {
+                String notice = voices.get(speaker.id()) instanceof ServerPlayer voice && voice.getBukkitEntity() instanceof VoicePlayer player
+                    ? player.noticeSince(since) : "";
+                long now = System.currentTimeMillis();
+                if (!warnedUndelivered || !notice.isEmpty() && !notice.equals(lastNotice) && now - lastNoticeWarning > 60_000) {
                     warnedUndelivered = true;
+                    lastNotice = notice;
+                    lastNoticeWarning = now;
                     String chatPlugin = formattingPlugin();
+                    String channel = channel(speaker.id());
                     plugin.getLogger().warning("Test player chat handed to " + (chatPlugin == null ? "the server chat" : chatPlugin)
                         + " did not reach any player within 2 seconds; sending such lines with the format in tab_chat.yml instead."
-                        + " Check that the chat plugin lets test players speak in its default channel, or set send_mode: format.");
+                        + (notice.isEmpty() ? "" : " " + (chatPlugin == null ? "The server" : chatPlugin) + " told " + speaker.name() + ": \"" + notice + "\".")
+                        + " Check that test players may speak in " + (channel == null ? "the default channel" : "channel " + channel)
+                        + " (their LuckPerms group needs its permissions), or set send_mode: format.");
                 }
                 sendFormatted(speaker, text);
             }, 2, TimeUnit.SECONDS);
@@ -592,6 +687,7 @@ final class TestChat implements Listener {
             sent.addLast(now);
             spokeAt.put(name.toLowerCase(Locale.ROOT), now);
             remember(new Said(name, false, text, now));
+            spoke(new Said(name, false, text, now));
         }
     }
 
@@ -602,10 +698,25 @@ final class TestChat implements Listener {
     private boolean chat(Speaker speaker, String text) {
         prepareUser(speaker.id(), speaker.name(), speaker.group());
         ServerPlayer voice = voice(speaker.id(), speaker.name());
+        String channel = channel(speaker.id());
+        if (channel != null) {
+            String problem = ChatChannels.join(voice.getBukkitEntity(), channel);
+            if (problem != null) warnChannel(problem);
+        }
         lastVoiceCancelled = null;
         new ChatProcessor(MinecraftServer.getServer(), voice, PlayerChatMessage.unsigned(speaker.id(), text), true).process();
         Boolean cancelled = lastVoiceCancelled;
         return cancelled == null || !cancelled || listenCancelled();
+    }
+
+    /** 同一个原因每分钟最多提示一次。 */
+    private void warnChannel(String problem) {
+        long now = System.currentTimeMillis();
+        if (problem.equals(lastChannelProblem) && now - lastChannelWarning < 60_000) return;
+        lastChannelProblem = problem;
+        lastChannelWarning = now;
+        plugin.getLogger().warning("Could not move a test player to its chat channel (tab_chat.yml channels): " + problem
+            + ". It speaks in the channel the chat plugin gives it.");
     }
 
     /** 测试假人说话、解析变量时用的玩家对象。它不在世界里，也不在玩家列表里。 */
@@ -652,6 +763,7 @@ final class TestChat implements Listener {
             sent.addLast(now);
             spokeAt.put(speaker.key(), now);
             remember(new Said(speaker.name(), false, text, now));
+            spoke(new Said(speaker.name(), false, text, now));
         }
         // 指令在玩家或控制台所在的线程执行；聊天流程（AsyncPlayerChatEvent）只能在异步线程触发
         Bukkit.getAsyncScheduler().runNow(plugin, unused -> send(speaker, text, true));
@@ -915,23 +1027,42 @@ final class TestChat implements Listener {
         else relay.testJoined(name, id);
     }
 
-    /** 由本服安排测试假人进服后的招呼。其他子服转来的直接调用这里，不再转出去。 */
+    /**
+     * 由本服安排测试假人进服后的招呼。其他子服转来的直接调用这里，不再转出去。
+     * 有队友在线时更常打招呼（潜水的也会），说的是 lines.team_join_greet，队友先接话。
+     */
     void greet(String name, UUID id) {
         Settings s = settings;
-        if (s == null || !s.enabled() || !relay.leading() || !talkative(id) || !roll(s.joinGreet())) return;
+        if (s == null || !s.enabled() || !relay.leading() || realOnline() == 0) return;
+        String mate = mateOnline(name);
+        if (!talkative(id) && mate == null || !roll(mate != null ? Math.min(100, s.joinGreet() * 2) : s.joinGreet())) return;
         String key = name.toLowerCase(Locale.ROOT);
         synchronized (this) {
-            String text = line("join_greet");
+            boolean team = mate != null && s.lines().containsKey("team_join_greet") && roll(60);
+            String text = fill(line(team ? "team_join_greet" : "join_greet"), null, mate == null ? null : Similarity.nick(mate));
             if (text == null) return;
-            long burst = rollBurst();
+            long burst = team ? 0 : rollBurst();
+            int chance = mate != null ? Math.min(100, s.answer() + 30) : s.answer();
             queue(key, text, IDLE, System.currentTimeMillis() + between(3000, 15000), online -> {
-                if (burst != 0 || roll(s.answer())) answers(online, key, "join_reply", name, 1000, 3000, burst);
+                if (burst != 0 || roll(chance)) answers(online, key, "join_reply", name, 1000, 3000, burst);
             }, false, burst);
         }
     }
 
+    /** 一个在线的队友（名字）；没有时为 null。用上一次定时器看到的在线名单，可以在 TabBenchmark 的锁里调用。 */
+    private String mateOnline(String name) {
+        if (!settings.teams().enabled()) return null;
+        var mates = new ArrayList<String>();
+        Map<String, Speaker> online = lastOnline;
+        for (var profile : plugin.testProfiles().teammates(name)) {
+            if (online.containsKey(profile.name().toLowerCase(Locale.ROOT))) mates.add(profile.name());
+        }
+        return mates.isEmpty() ? null : mates.get(ThreadLocalRandom.current().nextInt(mates.size()));
+    }
+
     /**
      * speaker 刚说完一句（进服打招呼、下线道别），其他人回应：平时一个人，一窝蜂时几个人抢着回。
+     * 有队友在线时队友先回，说 lines 里 team_ 开头的那一类（如 team_join_reply），没有这一类时说普通的。
      * 在 tick 发出那句之后调用（持有本对象的锁）。
      */
     private void answers(Map<String, Speaker> online, String speaker, String pool, String name, long delayMin, long delayMax, long burst) {
@@ -939,11 +1070,20 @@ final class TestChat implements Listener {
         var used = new HashSet<String>(Set.of(speaker));
         var texts = new HashSet<String>();
         int count = burst != 0 ? burstSize() - 1 : 1;
+        Speaker self = online.get(speaker);
         for (int index = 0; index < count; index++) {
-            Speaker other = pick(online, now, used, burst != 0);
+            Speaker other = null;
+            if (index == 0 && self != null) {
+                var mates = new ArrayList<Speaker>();
+                for (Speaker candidate : online.values()) if (self.teammate(candidate) && !busy(candidate.key())) mates.add(candidate);
+                if (!mates.isEmpty()) other = mates.get(ThreadLocalRandom.current().nextInt(mates.size()));
+            }
+            boolean mate = other != null;
+            if (other == null) other = pick(online, now, used, burst != 0);
             if (other == null) break;
             used.add(other.key());
-            String answer = fill(line(pool, texts), name, null);
+            String chosen = mate && settings.lines().containsKey("team_" + pool) ? "team_" + pool : pool;
+            String answer = fill(line(chosen, texts), mate ? Similarity.nick(name) : name, null);
             long at = burst != 0 ? now + between(200, 800) + index * between(200, 900) : now + between(delayMin, delayMax);
             if (answer != null) queue(other.key(), answer, GREET, at, null, false, burst);
         }
@@ -955,17 +1095,20 @@ final class TestChat implements Listener {
      */
     boolean farewell(String name, UUID id, Runnable leave) {
         Settings s = settings;
-        if (s == null || !s.enabled() || !talkative(id) || !roll(s.farewell())) return false;
+        if (s == null || !s.enabled()) return false;
+        String mate = relay.leading() ? mateOnline(name) : null;
+        if (!talkative(id) && mate == null || !roll(mate != null ? Math.min(100, s.farewell() * 2) : s.farewell())) return false;
         if (!relay.leading()) return relay.farewell(name, id, leave);
         if (realOnline() == 0) return false;
         String key = name.toLowerCase(Locale.ROOT);
         synchronized (this) {
             String text = line("farewell");
             if (text == null) return false;
-            long burst = rollBurst();
+            long burst = mate != null ? 0 : rollBurst();
+            int chance = mate != null ? Math.min(100, s.answer() + 30) : s.answer();
             queue(key, text, GREET, System.currentTimeMillis(), online -> {
                 Bukkit.getAsyncScheduler().runDelayed(plugin, unused -> leave.run(), between(3000, 9000), TimeUnit.MILLISECONDS);
-                if (burst != 0 || roll(s.answer())) answers(online, key, "farewell_reply", name, 500, 2000, burst);
+                if (burst != 0 || roll(chance)) answers(online, key, "farewell_reply", name, 500, 2000, burst);
             }, false, burst);
             return true;
         }
@@ -989,8 +1132,13 @@ final class TestChat implements Listener {
 
     // ══ 冷场闲聊 ══════════════════════════════════════════
 
-    /** 开一个话题：AI 可用时交给 AI（返回要在锁外执行的调用），否则按语料。 */
+    /** 开一个话题：按 teams.chat_percent 先看有没有小队可以内部聊天；AI 可用时交给 AI（返回要在锁外执行的调用），否则按语料。 */
     private Runnable startIdle(Map<String, Speaker> online, long now, int real) {
+        Settings s = settings;
+        if (s.teams().enabled() && roll(s.teams().chatPercent())) {
+            List<Speaker> team = teamCast(online, now);
+            if (team != null) return teamIdle(team, online, now, real);
+        }
         var talkers = new ArrayList<Speaker>();
         for (Speaker speaker : online.values()) if (speaker.talkative() && !busy(speaker.key()) && !coolingDown(speaker.key(), now)) talkers.add(speaker);
         if (talkers.isEmpty()) return null;
@@ -998,13 +1146,13 @@ final class TestChat implements Listener {
             idleBusy = true;
             Collections.shuffle(talkers);
             var cast = new ArrayList<TestAi.Candidate>();
-            for (Speaker speaker : talkers.subList(0, Math.min(6, talkers.size()))) {
-                cast.add(new TestAi.Candidate(speaker.name(), speaker.persona(), activity(speaker.id()), ""));
-            }
+            for (Speaker speaker : talkers.subList(0, Math.min(6, talkers.size()))) cast.add(candidate(speaker, "", online));
             var context = List.copyOf(history);
+            var said = List.copyOf(spoken);
+            var topics = topics(3);
             // 一窝蜂要先定下来：让 AI 一次给出几个人抢着说的几句
             long burst = cast.size() >= 3 ? rollBurst() : 0;
-            return () -> ai.idle(cast, context, settings.ai().maxLines(), burst != 0, real).whenComplete((lines, error) -> {
+            return () -> ai.idle(cast, context, said, s.ai().maxLines(), burst != 0, topics, real).whenComplete((lines, error) -> {
                 synchronized (this) {
                     idleBusy = false;
                     if (error == null && lines != null) chain(fresh(lines), 0, IDLE, null, System.currentTimeMillis(), burst);
@@ -1016,6 +1164,89 @@ final class TestChat implements Listener {
         return null;
     }
 
+    /** 挑一个可以内部聊天的小队：至少两个队员在线、没在排队，至少一个不在冷却；5 分钟内聊过的小队先不挑。没有时为 null。 */
+    private List<Speaker> teamCast(Map<String, Speaker> online, long now) {
+        var teams = new HashMap<String, List<Speaker>>();
+        for (Speaker speaker : online.values()) {
+            if (!speaker.team().isEmpty() && !busy(speaker.key())) teams.computeIfAbsent(speaker.team(), unused -> new ArrayList<>()).add(speaker);
+        }
+        var choices = new ArrayList<List<Speaker>>();
+        for (var entry : teams.entrySet()) {
+            var members = entry.getValue();
+            if (members.size() < 2 || now - teamChatAt.getOrDefault(entry.getKey(), 0L) < 300_000) continue;
+            if (members.stream().allMatch(member -> coolingDown(member.key(), now))) continue;
+            choices.add(members);
+        }
+        if (choices.isEmpty()) return null;
+        var members = new ArrayList<>(choices.get(ThreadLocalRandom.current().nextInt(choices.size())));
+        Collections.shuffle(members);
+        // 先说话的人不在冷却
+        members.sort(Comparator.comparing(member -> coolingDown(member.key(), now)));
+        return members.subList(0, Math.min(4, members.size()));
+    }
+
+    /** 小队内部聊几句：AI 可用时交给 AI，否则按 teams.dialogues。 */
+    private Runnable teamIdle(List<Speaker> team, Map<String, Speaker> online, long now, int real) {
+        Settings s = settings;
+        String name = team.getFirst().team();
+        teamChatAt.put(name, now);
+        if (ai.usable() && ai.reserve()) {
+            idleBusy = true;
+            var cast = new ArrayList<TestAi.Candidate>();
+            for (Speaker speaker : team) cast.add(candidate(speaker, "", online));
+            var context = List.copyOf(history);
+            var said = List.copyOf(spoken);
+            String project = TestTeams.project(name, s.teams().projects());
+            return () -> ai.team(cast, context, said, name, project, s.ai().maxLines(), real).whenComplete((lines, error) -> {
+                synchronized (this) {
+                    idleBusy = false;
+                    if (error == null && lines != null) chain(fresh(lines), 0, IDLE, null, System.currentTimeMillis(), 0);
+                    else if (error != null) ruleTeamIdle(team, System.currentTimeMillis());
+                }
+            });
+        }
+        ruleTeamIdle(team, now);
+        return null;
+    }
+
+    private void ruleTeamIdle(List<Speaker> team, long now) {
+        var cast = new ArrayList<>(team);
+        cast.removeIf(speaker -> busy(speaker.key()));
+        var script = script(settings.teams().dialogues(), cast.size());
+        if (script == null) return;
+        step(script, 0, cast.toArray(Speaker[]::new), now, 0);
+    }
+
+    /** 随机挑一段人数够的对话，避开最近用过的几段。 */
+    private List<Step> script(List<List<Step>> all, int people) {
+        var fits = new ArrayList<List<Step>>();
+        for (var script : all) {
+            int roles = 1;
+            for (Step step : script) roles = Math.max(roles, step.role() + 1);
+            if (roles <= people) fits.add(script);
+        }
+        if (fits.isEmpty()) return null;
+        var fresh = new ArrayList<>(fits);
+        fresh.removeIf(recentDialogues::contains);
+        var pool = fresh.isEmpty() ? fits : fresh;
+        var chosen = pool.get(ThreadLocalRandom.current().nextInt(pool.size()));
+        recentDialogues.addLast(chosen);
+        while (recentDialogues.size() > Math.min(12, all.size() / 2 + 1)) recentDialogues.pollFirst();
+        return chosen;
+    }
+
+    /** 从 ai.topics 里挑几个最近没给过的话题方向。 */
+    private List<String> topics(int count) {
+        var all = new ArrayList<>(settings.ai().topics());
+        if (all.isEmpty()) return List.of();
+        Collections.shuffle(all);
+        all.sort(Comparator.comparing(recentTopics::contains));
+        var picked = List.copyOf(all.subList(0, Math.min(count, all.size())));
+        recentTopics.addAll(picked);
+        while (recentTopics.size() > Math.max(0, Math.min(15, all.size() - count))) recentTopics.pollFirst();
+        return picked;
+    }
+
     private void ruleIdle(List<Speaker> talkers, long now) {
         Settings s = settings;
         var shuffled = new ArrayList<>(talkers);
@@ -1023,10 +1254,10 @@ final class TestChat implements Listener {
         if (shuffled.isEmpty()) return;
         Collections.shuffle(shuffled);
         if (shuffled.size() >= 2 && !s.dialogues().isEmpty() && roll(s.dialoguePercent())) {
-            var script = s.dialogues().get(ThreadLocalRandom.current().nextInt(s.dialogues().size()));
-            int roles = 1;
-            for (Step step : script) roles = Math.max(roles, step.role() + 1);
-            if (roles <= shuffled.size()) {
+            var script = script(s.dialogues(), shuffled.size());
+            if (script != null) {
+                int roles = 1;
+                for (Step step : script) roles = Math.max(roles, step.role() + 1);
                 // 一窝蜂：这段对话几个人你一句我一句抢着说完
                 step(script, 0, shuffled.subList(0, roles).toArray(Speaker[]::new), now, rollBurst());
                 return;
@@ -1049,7 +1280,10 @@ final class TestChat implements Listener {
         if (index >= script.size()) return;
         Step step = script.get(index);
         String text = any(step.texts());
-        for (int role = 0; role < cast.length; role++) text = text.replace("%" + (char) ('A' + role) + "%", cast[role].name());
+        for (int role = 0; role < cast.length; role++) {
+            String token = "%" + (char) ('A' + role) + "%";
+            if (text.contains(token)) text = text.replace(token, roll(50) ? Similarity.nick(cast[role].name()) : cast[role].name());
+        }
         queue(cast[step.role()].key(), text, IDLE, notBefore, next -> {
             for (Speaker member : cast) if (!next.containsKey(member.key())) return;
             long delay = burst != 0 ? between(200, 900) : between(500, 2500);
@@ -1063,18 +1297,27 @@ final class TestChat implements Listener {
     private Runnable aiReply(UUID player, String name, String text, Speaker mentioned, Map<String, Speaker> online, long now) {
         Partner partner = partners.get(player);
         String partnerKey = partner != null && partner.until() > now ? partner.speaker() : null;
+        Speaker partnerSpeaker = partnerKey == null ? null : online.get(partnerKey);
+        var first = new ArrayList<TestAi.Candidate>();
         var candidates = new ArrayList<TestAi.Candidate>();
         for (Speaker speaker : online.values()) {
             boolean talking = speaker.key().equals(partnerKey);
             boolean named = mentioned != null && mentioned.key().equals(speaker.key());
-            if (!talking && !named && (!speaker.talkative() || busy(speaker.key()) || coolingDown(speaker.key(), now))) continue;
-            String note = named ? "被叫到了" : talking ? "正在和 " + name + " 聊天" : "";
-            candidates.add(new TestAi.Candidate(speaker.name(), speaker.persona(), activity(speaker.id()), note));
+            // 被叫到的人、正在聊天的人的队友，潜水的也可能顺嘴接一句
+            boolean mate = mentioned != null && speaker.teammate(mentioned) || partnerSpeaker != null && speaker.teammate(partnerSpeaker);
+            if (!talking && !named && (!speaker.talkative() && !mate || busy(speaker.key()) || coolingDown(speaker.key(), now) && !mate)) continue;
+            String note = named ? "被叫到了" : talking ? "正在和 " + name + " 聊天"
+                : mate ? "和" + (mentioned != null && speaker.teammate(mentioned) ? "被叫到的 " + mentioned.name() : "正在聊天的 " + partnerSpeaker.name())
+                    + " 一个小队" : "";
+            (talking || named || mate ? first : candidates).add(candidate(speaker, note, online));
         }
-        if (candidates.isEmpty()) return null;
         Collections.shuffle(candidates);
+        candidates.addAll(0, first);
+        if (candidates.isEmpty()) return null;
         if (candidates.size() > 8) candidates.subList(8, candidates.size()).clear();
+        Collections.shuffle(candidates);
         var context = List.copyOf(history);
+        var said = List.copyOf(spoken);
         boolean interrupting = settings.dontInterrupt() && realTalking(now) && partnerKey == null && mentioned == null;
         // 一窝蜂要先定下来：让 AI 一次给出几个人抢着回的几句；被叫到名字、别人正在聊时不起哄
         long burst = interrupting || mentioned != null ? 0 : rollBurst();
@@ -1083,7 +1326,7 @@ final class TestChat implements Listener {
         long chosen = burst;
         int size = crowd, others = realOnline();
         String lower = text.toLowerCase(Locale.ROOT);
-        return () -> ai.reply(candidates, context, name, text, mentioned == null ? null : mentioned.name(), interrupting, size, others)
+        return () -> ai.reply(candidates, context, said, name, text, mentioned == null ? null : mentioned.name(), interrupting, size, others)
             .whenComplete((lines, error) -> {
                 Map<String, Speaker> current = error != null ? online() : null;
                 synchronized (this) {
@@ -1094,11 +1337,20 @@ final class TestChat implements Listener {
             });
     }
 
-    /** AI 给的话里去掉最近已经有人说过的（AI 偶尔会重复）。 */
+    /**
+     * AI 给的话里去掉和最近说过的太像的（AI 常常换个标点、加个字又说一遍）：一两个字的短句和最近 8 句比，长的和最近 40 句比；
+     * 同一批里也不能两句太像。
+     */
     private List<TestAi.Reply> fresh(List<TestAi.Reply> lines) {
         var result = new ArrayList<TestAi.Reply>();
-        var seen = new HashSet<String>();
-        for (TestAi.Reply reply : lines) if (!recentTexts.contains(reply.text()) && seen.add(reply.text())) result.add(reply);
+        var recent = new ArrayList<>(recentTexts);
+        for (TestAi.Reply reply : lines) {
+            boolean shortText = Similarity.normalize(reply.text()).codePointCount(0, Similarity.normalize(reply.text()).length()) < 3;
+            var against = shortText ? recent.subList(Math.max(0, recent.size() - 8), recent.size()) : recent;
+            if (against.stream().anyMatch(old -> Similarity.similar(old, reply.text()))) continue;
+            if (result.stream().anyMatch(kept -> Similarity.similar(kept.text(), reply.text()))) continue;
+            result.add(reply);
+        }
         return result;
     }
 

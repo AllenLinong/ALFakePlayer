@@ -190,6 +190,7 @@ final class TabBenchmark {
         var shown = new Shown(profile.name(), plugin.testLabel(profile.name(), profile.group()));
         active.put(profile.id(), shown);
         send(new ClientboundPlayerInfoUpdatePacket(ADD, List.of(entry(profile.id(), shown))));
+        plugin.titles().testPlayer(profile.id(), profile.name());
         if (announce) {
             announce(profile, true);
             plugin.testChat().testJoined(profile.name(), profile.id());

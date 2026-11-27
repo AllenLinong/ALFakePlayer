@@ -263,6 +263,14 @@ final class Database implements AutoCloseable {
             execute(connection, "CREATE TABLE IF NOT EXISTS " + table("test_profiles") + " ("
                 + "name_key VARCHAR(16) NOT NULL PRIMARY KEY, name VARCHAR(16) NOT NULL, id VARCHAR(36) NOT NULL,"
                 + " grp VARCHAR(64) NOT NULL, created BIGINT NOT NULL)" + engine);
+            // 1.0.6 新增测试假人的小队（空字符串为不在小队里）
+            if (!hasColumn(connection, table("test_profiles"), "team")) {
+                try { execute(connection, "ALTER TABLE " + table("test_profiles") + " ADD COLUMN team VARCHAR(64) NOT NULL DEFAULT ''"); }
+                catch (SQLException error) { if (!hasColumn(connection, table("test_profiles"), "team")) throw error; }
+            }
+            // 1.0.6 新增：每个假人（召唤的和测试假人）用哪个皮肤，跨服共用，尽量不和别的假人重复
+            execute(connection, "CREATE TABLE IF NOT EXISTS " + table("skins") + " ("
+                + "id VARCHAR(36) NOT NULL PRIMARY KEY, entry VARCHAR(512) NOT NULL, used BIGINT NOT NULL)" + engine);
             execute(connection, "CREATE TABLE IF NOT EXISTS " + table("servers") + " ("
                 + "server_id VARCHAR(64) NOT NULL PRIMARY KEY, name VARCHAR(128) NOT NULL, instance VARCHAR(36) NOT NULL,"
                 + " live_count INT NOT NULL DEFAULT 0, player_count INT NOT NULL DEFAULT 0, heartbeat BIGINT NOT NULL)" + engine);

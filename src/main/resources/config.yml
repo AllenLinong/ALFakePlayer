@@ -1,5 +1,5 @@
 # 配置版本号，由插件自动管理，请勿修改。插件更新后会据此自动升级本文件，自定义内容保留
-config_version: 1
+config_version: 2
 
 # ============================================================
 # ALFakePlayer 主配置文件 (config.yml)
@@ -91,6 +91,25 @@ easybot:
   summoned_fake_players: true
   # 列表里包括 /afp test 的 TAB 测试假人
   test_players: true
+
+# ── PlayerTitle（米饭插件的称号插件） ─────────────────────
+playertitle:
+  # 装了 PlayerTitle 时，从它的称号商店里给假人随机匹配几个称号，按概率戴上一个，像真人买过、戴着称号一样
+  # 每个假人只在第一次出现、还没有任何称号时匹配一次，之后由 PlayerTitle 保存，跨服、重启后都不变；没装 PlayerTitle 时不起作用
+  # 称号显示在哪里由 PlayerTitle 的变量 %playerTitle_use% 决定：聊天插件的格式、tab_chat.yml 的 format 里写了它，测试假人说话时就带着称号
+  # 修改后执行 /afp reload 生效
+  enabled: true
+  # /afp test 的 TAB 测试假人
+  test_players: true
+  # 玩家召唤的假人。称号可能带 buff（药水效果、属性），默认不给
+  summoned: false
+  # 只从这些购买类型的称号里挑：not 免费，vault 金币，playerPoints 点券，coin 称号币，itemStack 物品，playerCurrency 多货币，
+  # activity 活动。权限称号（permission）永远不挑，写了会报错；隐藏的称号不挑；一个称号有几个购买条件时，每个都要在这里
+  buy_types: [not, vault, playerPoints, coin, itemStack, playerCurrency]
+  # 每个假人有几个称号（在最少和最多之间随机）
+  count: [1, 3]
+  # 多少百分比的假人戴着其中一个称号，其余的有称号但没戴（0–100）
+  wear_percent: 70
 
 # ── 召唤费用 ──────────────────────────────────────────────
 economy:

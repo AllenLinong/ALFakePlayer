@@ -75,8 +75,14 @@ final class Roster {
         static final ClaimResult ACQUIRED = new ClaimResult(Claim.ACQUIRED, null);
         static final ClaimResult MISSING = new ClaimResult(Claim.MISSING, null);
     }
-    /** /afp test 测试假人的固定档案：名字、UUID 和权限组，第一次用到时生成，之后不变。 */
-    record TestProfile(String name, UUID id, String group) { }
+    /** /afp test 测试假人的固定档案：名字、UUID、权限组和小队（不在小队里时为空），第一次用到时生成，之后不变。 */
+    record TestProfile(String name, UUID id, String group, String team) {
+        TestProfile withGroup(String next) { return new TestProfile(name, id, next, team); }
+        TestProfile withTeam(String next) { return new TestProfile(name, id, group, next); }
+    }
+
+    /** 假人的皮肤：皮肤名单里的哪一项（名字小写或链接），最近一次用到的时间。 */
+    record SkinChoice(String entry, long used) { }
 
     /** 正常关服时在本服运行的假人：开服后在这个位置召唤回来，并恢复生命和饱食度。 */
     record RestorePoint(UUID dummy, String world, double x, double y, double z, float yaw, float pitch,
@@ -965,8 +971,8 @@ final class Roster {
             for (TestProfile candidate : candidates) {
                 String key = candidate.name().toLowerCase(Locale.ROOT);
                 if (stored.containsKey(key)) continue;
-                Database.update(connection, db.insertIgnore() + t("test_profiles") + " (name_key, name, id, grp, created)"
-                    + " VALUES (?, ?, ?, ?, " + db.now() + ")", key, candidate.name(), candidate.id().toString(), candidate.group());
+                Database.update(connection, db.insertIgnore() + t("test_profiles") + " (name_key, name, id, grp, team, created)"
+                    + " VALUES (?, ?, ?, ?, '', " + db.now() + ")", key, candidate.name(), candidate.id().toString(), candidate.group());
                 inserted = true;
             }
             return inserted ? readTestProfiles(connection) : stored;
@@ -975,14 +981,73 @@ final class Roster {
 
     private Map<String, TestProfile> readTestProfiles(Connection connection) throws SQLException {
         Map<String, TestProfile> result = new HashMap<>();
-        try (PreparedStatement select = connection.prepareStatement("SELECT name_key, name, id, grp FROM " + t("test_profiles"));
+        try (PreparedStatement select = connection.prepareStatement("SELECT name_key, name, id, grp, team FROM " + t("test_profiles"));
              ResultSet rows = select.executeQuery()) {
             while (rows.next()) {
-                try { result.put(rows.getString(1), new TestProfile(rows.getString(2), UUID.fromString(rows.getString(3)), rows.getString(4))); }
+                try {
+                    String team = rows.getString(5);
+                    result.put(rows.getString(1), new TestProfile(rows.getString(2), UUID.fromString(rows.getString(3)), rows.getString(4),
+                        team == null ? "" : team));
+                }
                 catch (IllegalArgumentException bad) { plugin.getLogger().warning("Ignoring an invalid test profile: " + rows.getString(1)); }
             }
         }
         return result;
+    }
+
+    /**
+     * 重新分小队：在事务里读出全部档案，交给 planner 算出要改的（小写名字 → 小队，空字符串为退出小队），写回后返回全部档案。
+     * 先锁住 meta 里的一行，几个子服同时启动时一个一个来，后来的看到先来的分好的结果。planner 可能被重试，不能修改外部状态。
+     */
+    CompletableFuture<Map<String, TestProfile>> planTestTeams(java.util.function.Function<Map<String, TestProfile>, Map<String, String>> planner) {
+        return submit(() -> db.transaction(connection -> {
+            db.setMeta(connection, "test-teams", String.valueOf(System.currentTimeMillis()));
+            Map<String, TestProfile> stored = readTestProfiles(connection);
+            Map<String, String> changes = planner.apply(stored);
+            for (var change : changes.entrySet()) {
+                Database.update(connection, "UPDATE " + t("test_profiles") + " SET team = ? WHERE name_key = ?", change.getValue(), change.getKey());
+            }
+            return changes.isEmpty() ? stored : readTestProfiles(connection);
+        }));
+    }
+
+    /** 全部假人的皮肤，同时删掉 days 天没用过的。 */
+    CompletableFuture<Map<UUID, SkinChoice>> loadSkins(int days) {
+        return submit(() -> db.withConnection(connection -> {
+            Database.update(connection, "DELETE FROM " + t("skins") + " WHERE used < " + db.now() + " - ?", days * 86_400_000L);
+            Map<UUID, SkinChoice> result = new HashMap<>();
+            try (PreparedStatement select = connection.prepareStatement("SELECT id, entry, used FROM " + t("skins"));
+                 ResultSet rows = select.executeQuery()) {
+                while (rows.next()) {
+                    try { result.put(UUID.fromString(rows.getString(1)), new SkinChoice(rows.getString(2), rows.getLong(3))); }
+                    catch (IllegalArgumentException ignored) { }
+                }
+            }
+            return result;
+        }));
+    }
+
+    /**
+     * 记下假人的皮肤，结果为数据库里最终的那一项。previous 为 null 时只在还没有记录时写入（其他子服先写的为准）；
+     * 否则只在记录仍是 previous 时换成 entry（其他子服已经换过时用它换的）。
+     */
+    CompletableFuture<String> claimSkin(UUID id, String entry, String previous) {
+        return submit(() -> db.withConnection(connection -> {
+            int changed = previous == null ? 0 : Database.update(connection, "UPDATE " + t("skins") + " SET entry = ?, used = " + db.now()
+                + " WHERE id = ? AND entry = ?", entry, id.toString(), previous);
+            if (changed == 0) Database.update(connection, db.insertIgnore() + t("skins") + " (id, entry, used) VALUES (?, ?, " + db.now() + ")",
+                id.toString(), entry);
+            try (PreparedStatement select = connection.prepareStatement("SELECT entry FROM " + t("skins") + " WHERE id = ?")) {
+                select.setString(1, id.toString());
+                try (ResultSet rows = select.executeQuery()) { return rows.next() ? rows.getString(1) : entry; }
+            }
+        }));
+    }
+
+    /** 更新假人皮肤最近一次用到的时间。 */
+    void touchSkin(UUID id) {
+        submit(() -> db.withConnection(connection -> Database.update(connection, "UPDATE " + t("skins") + " SET used = " + db.now()
+            + " WHERE id = ?", id.toString())));
     }
 
     /** 修改测试假人档案的权限组。 */

@@ -16,6 +16,7 @@ import net.minecraft.world.level.GameType;
 import org.bukkit.*;
 import org.bukkit.attribute.Attribute;
 import org.bukkit.command.*;
+import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.configuration.file.FileConfiguration;
 import org.bukkit.configuration.file.YamlConfiguration;
 import org.bukkit.craftbukkit.CraftServer;
@@ -77,6 +78,7 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
     private volatile TestProfiles.Settings testSettings;
     private final RemoteTab remoteTab = new RemoteTab(this);
     private final Skins skins = new Skins(this);
+    private final PlayerTitles titles = new PlayerTitles(this);
     /** 已注册的 PlaceholderAPI 扩展；用 Object 保存，未安装 PlaceholderAPI 时不会加载它的类。 */
     private Object placeholders;
     /** 各档位的运行半径（区块），即假人的模拟距离。重载时整体替换。 */
@@ -105,6 +107,7 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
 
     TabBenchmark benchmark() { return benchmark; }
     Skins skins() { return skins; }
+    PlayerTitles titles() { return titles; }
 
     TestChat testChat() { return testChat; }
 
@@ -188,6 +191,7 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
             }
             network = new Network(this, serverId, networkSettings, database.mysql());
             roster = new Roster(this, database, serverId, serverName, networkSettings.timeoutMillis(), networkSettings.heartbeatMillis());
+            skins.attach(roster);
             purchasePrice = new PurchasePrice(purchasePrice.coins(), purchasePrice.points(), roster.loadPurchaseItems());
             network.start(database, this::handleRemote);
             if (network.enabled()) {
@@ -324,6 +328,8 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
         List<String> claimPlugins = List.copyOf(config.getStringList("claims.plugins"));
         var easyBotSettings = new EasyBotCompat.Settings(config.getBoolean("easybot.enabled", true),
             config.getBoolean("easybot.summoned_fake_players", true), config.getBoolean("easybot.test_players", true));
+        ConfigurationSection titleSection = config.getConfigurationSection("playertitle");
+        var titleSettings = PlayerTitles.Settings.read(titleSection != null ? titleSection : config.createSection("playertitle"));
         return () -> {
             if (menus == null) {
                 menus = new Menus(this, menuConfig);
@@ -363,6 +369,7 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
             ClaimIdentity.configure(claimPlugins);
             easyBot = easyBotSettings;
             EasyBotCompat.apply(this);
+            titles.configure(titleSettings);
             testSettings = tests;
             testChat.configure(chat);
             skins.configure(skinsOn, skinNames, tests.names());
@@ -852,6 +859,8 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
             if (!player.isValid() || dummy.isRemoved()) throw new IllegalStateException("Dummy entity was not added");
             active.inWorld = true;
             dummy.ready();
+            // PlayerTitle 戴称号时会刷新在线玩家的显示和 buff，在假人自己的线程里做
+            titles.summoned(entry.id, nativeName, wear -> player.getScheduler().run(this, unused -> { if (live.get(entry.id) == active) wear.run(); }, null));
             active.actions.direction(yaw);
             applyName(active);
             for (Player viewer : Bukkit.getOnlinePlayers()) showDummy(active, viewer);
@@ -1600,13 +1609,14 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
         teleports.adminRequest(player, entry);
     }
 
-    /** test <数量> | stop | info <名字> | group <名字> <组> | say <名字> <内容> | chat | ai：TAB 测试假人。 */
+    /** test <数量> | stop | info <名字> | group <名字> <组> | say <名字> <内容> | chat | ai | teams：TAB 测试假人。 */
     private void testCommand(CommandSender sender, String[] args) {
         String sub = args.length >= 2 ? args[1].toLowerCase(Locale.ROOT) : "";
         if (args.length == 2 && sub.equals("stop")) { msg(sender, "benchmark_stopped", "count", benchmark.clear()); return; }
         if (args.length == 2 && sub.equals("chat")) { chatStatus(sender); return; }
         if (args.length == 2 && sub.equals("ai")) { testAi(sender); return; }
         if (!testProfiles.ready()) { msg(sender, "benchmark_loading"); return; }
+        if (args.length == 2 && sub.equals("teams")) { teamsCommand(sender); return; }
         if (args.length >= 4 && sub.equals("say")) {
             String text = String.join(" ", Arrays.copyOfRange(args, 3, args.length));
             if (testChat.say(args[2], text)) msg(sender, "benchmark_said", "name", args[2]);
@@ -1619,7 +1629,9 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
             else msg(sender, benchmark.shown(profile.id()) ? "benchmark_info_shown" : "benchmark_info_hidden",
                 "name", profile.name(), "group", profile.group(), "uuid", profile.id(),
                 "talk", messagePlain(testChat.talkative(profile.id()) ? "benchmark_talkative" : "benchmark_lurker"),
-                "persona", testChat.persona(profile.id()));
+                "persona", testChat.persona(profile.id()),
+                "team", profile.team().isEmpty() ? messagePlain("benchmark_no_team") : profile.team(),
+                "channel", Objects.requireNonNullElse(testChat.channel(profile.id()), messagePlain("benchmark_default_channel")));
             return;
         }
         if (args.length == 4 && sub.equals("group")) {
@@ -1645,6 +1657,26 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
         if (plan.target() < count) msg(sender, "benchmark_capped", "count", plan.target());
         if (plan.seconds() == 0) msg(sender, "benchmark_spawned", "count", plan.target());
         else msg(sender, "benchmark_ramping", "count", plan.target(), "seconds", plan.seconds());
+    }
+
+    /** /afp test teams：测试假人的小队和队员，在 TAB 中的（本服或其他子服）标绿。 */
+    private void teamsCommand(CommandSender sender) {
+        var teams = testProfiles.teams();
+        if (teams.isEmpty()) { msg(sender, "benchmark_teams_none"); return; }
+        msg(sender, "benchmark_teams_header", "count", teams.size());
+        var settings = testChat.settings();
+        teams.forEach((team, members) -> {
+            var names = new ArrayList<String>();
+            for (var member : members) {
+                boolean shown = benchmark.shown(member.id()) || testChat.relay().host(member.name()) != null;
+                names.add((shown ? "&a" : "&7") + member.name());
+            }
+            String project = settings == null ? "" : TestTeams.project(team, settings.teams().projects());
+            // 队员的颜色要按 & 颜色代码显示，不能当作普通文字代入
+            Component list = legacy(String.join("&7、", names));
+            sender.sendMessage(message("benchmark_teams_line", "team", team, "project", project)
+                .replaceText(builder -> builder.matchLiteral("%members%").replacement(list)));
+        });
     }
 
     /** /afp test chat：聊天的发送方式、排队和限流情况、AI 状态。 */
@@ -1983,7 +2015,7 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
                     }
                 }
                 case "test" -> {
-                    if (admin) options.addAll(List.of("stop", "info", "group", "say", "chat", "ai", "10", "50", "100",
+                    if (admin) options.addAll(List.of("stop", "info", "group", "say", "chat", "ai", "teams", "10", "50", "100",
                         String.valueOf(TabBenchmark.MAX_ENTRIES)));
                 }
                 default -> { }

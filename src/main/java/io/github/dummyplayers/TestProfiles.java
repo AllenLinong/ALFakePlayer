@@ -98,14 +98,56 @@ final class TestProfiles {
         return checkGroups().thenCompose(unused -> {
             var candidates = new ArrayList<Roster.TestProfile>();
             for (String name : next.names()) {
-                if (profile(name) == null) candidates.add(new Roster.TestProfile(name, UUID.randomUUID(), roll()));
+                if (profile(name) == null) candidates.add(new Roster.TestProfile(name, UUID.randomUUID(), roll(), ""));
             }
             return plugin.roster.ensureTestProfiles(candidates);
         }).thenCompose(loaded -> {
             profiles = Map.copyOf(loaded);
             ready = true;
             return revalidate();
+        }).thenCompose(changed -> formTeams().thenApply(unused -> changed));
+    }
+
+    /** 按 tab_chat.yml 的 teams 给名字表里的人分小队（已有的小队不动），写进档案。teams 关闭时不改动已有的小队。 */
+    CompletableFuture<Void> formTeams() {
+        var chat = plugin.testChat().settings();
+        if (chat == null || !chat.teams().enabled()) return CompletableFuture.completedFuture(null);
+        var keys = new ArrayList<String>();
+        for (String name : settings.names()) keys.add(name.toLowerCase(Locale.ROOT));
+        long seed = ThreadLocalRandom.current().nextLong();
+        var teams = chat.teams();
+        return plugin.roster.planTestTeams(stored -> TestTeams.plan(stored, keys, teams, seed)).handle((all, error) -> {
+            if (error != null) {
+                plugin.getLogger().log(Level.WARNING, "Could not save the teams of test players", error);
+                return null;
+            }
+            // 档案里的权限组以本服刚检查过的为准（revalidate 已写回数据库）
+            var next = new HashMap<String, Roster.TestProfile>();
+            all.forEach((key, profile) -> {
+                Roster.TestProfile known = profiles.get(key);
+                next.put(key, known == null ? profile : known.withTeam(profile.team()));
+            });
+            profiles = Map.copyOf(next);
+            return null;
         });
+    }
+
+    /** 和 name 同一个小队、在名字表里的其他人；不在小队里时为空。 */
+    List<Roster.TestProfile> teammates(String name) {
+        var profile = profile(name);
+        if (profile == null || profile.team().isEmpty()) return List.of();
+        var result = new ArrayList<Roster.TestProfile>();
+        for (var other : pool()) if (!other.id().equals(profile.id()) && other.team().equals(profile.team())) result.add(other);
+        return result;
+    }
+
+    /** 名字表里的小队：小队名 → 队员，按队员人数从多到少。 */
+    Map<String, List<Roster.TestProfile>> teams() {
+        var result = new TreeMap<String, List<Roster.TestProfile>>();
+        for (var profile : pool()) if (!profile.team().isEmpty()) result.computeIfAbsent(profile.team(), unused -> new ArrayList<>()).add(profile);
+        var sorted = new LinkedHashMap<String, List<Roster.TestProfile>>();
+        result.entrySet().stream().sorted((a, b) -> b.getValue().size() - a.getValue().size()).forEach(entry -> sorted.put(entry.getKey(), entry.getValue()));
+        return sorted;
     }
 
     /** 重新检查组是否存在，给组已失效的档案重新抽组。结果为权限组有变化的名字（小写）。 */
@@ -163,7 +205,7 @@ final class TestProfiles {
             if (examples.size() < 5) examples.add(profile.name() + " " + profile.group() + " -> " + group);
             changed.add(key);
             writes.add(plugin.roster.setTestGroup(profile.name(), group));
-            return new Roster.TestProfile(profile.name(), profile.id(), group);
+            return profile.withGroup(group);
         });
         if (changed.isEmpty()) return CompletableFuture.completedFuture(Set.of());
         plugin.getLogger().info("Re-assigned the group of " + changed.size() + " test player(s) whose group is no longer available: "
@@ -181,7 +223,7 @@ final class TestProfiles {
         var profile = profile(name);
         if (profile == null || !available.contains(normalized)) return CompletableFuture.completedFuture(false);
         var next = new HashMap<>(profiles);
-        next.put(profile.name().toLowerCase(Locale.ROOT), new Roster.TestProfile(profile.name(), profile.id(), normalized));
+        next.put(profile.name().toLowerCase(Locale.ROOT), profile.withGroup(normalized));
         profiles = Map.copyOf(next);
         return plugin.roster.setTestGroup(profile.name(), normalized).thenApply(unused -> true);
     }

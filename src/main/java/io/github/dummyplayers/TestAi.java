@@ -45,10 +45,61 @@ final class TestAi {
         "苦力怕：嘶~", "挖到钻石下一秒掉岩浆", "别挖脚下的方块", "床在下界会炸", "别和末影人对视", "三十级附魔出个效率一",
         "钓鱼佬永不空军", "村民：嗯？", "红石大佬带带我", "一镐下去全是石头", "背包满了啥都舍不得扔", "狗又掉岩浆了",
         "苦力怕是我爹", "钻石！（史蒂夫音）");
-
+    /** tab_chat.yml 没写 ai.topics 时冷场开话题的方向：每次随机挑几个给 AI，最近给过的不再给。 */
+    static final List<String> DEFAULT_TOPICS = List.of("附魔出了垃圾属性", "村民交易涨价了", "刚死了一次东西掉了", "建筑卡住了不知道怎么盖",
+        "红石机器出问题了", "挖到好东西想炫耀", "找不到某种资源", "被怪物偷袭", "下雨打雷", "宠物（狗、猫、马）的事", "钓鱼钓到怪东西",
+        "跑图看到奇怪的地形", "背包满了要整理", "刚做好一个农场", "想换个地方住", "抱怨现实里的作业或上班", "要去吃饭了或者点外卖",
+        "说自己困了想睡", "刚看了个游戏视频", "问别人在干嘛", "吐槽自己手残", "约人一起做点事", "问服务器里有没有人卖东西",
+        "聊别的游戏", "说今天天气", "说自己刚上线还没想好干嘛", "炫耀装备", "问哪里有村庄或者要塞", "嫌夜晚太长", "刚从下界回来");
+    /** 打字习惯，按 UUID 固定分配给测试假人，让几个人的说法明显不同。 */
+    static final List<String> HABITS = List.of("打字很短，常常只回一两个字", "爱用空格代替标点断句", "偶尔打错字、用拼音缩写",
+        "爱用叠词，比如“好好好”“来来来”", "爱带“hhh”", "句尾爱加“了”“啊”", "说话直，很少用语气词", "偶尔用 qwq、awa 这种颜文字",
+        "爱接别人的话茬", "爱用问号反问", "喜欢连发两三条短消息说一件事", "说话慢悠悠，爱用省略号", "爱用“草”“绝了”“离谱”",
+        "回别人常用“？”");
+    /** 心情，每人每 20～40 分钟换一种。 */
+    static final List<String> MOODS = List.of("心情不错", "有点困", "有点无聊", "挺兴奋", "有点烦", "饿了", "刚上线", "在摸鱼",
+        "很专注，不太想说话", "刚死了一次有点郁闷", "闲着没事", "刚挖到好东西");
+    /** 语气参考，每次随机挑两段，免得 AI 总学同一段。 */
+    private static final List<String> EXAMPLES = List.of("""
+            A：有人一起下矿吗
+            B：等会 箱子还没整完
+            C：几层
+            A：-50左右
+            B：来了来了""", """
+            （有人说“我又死了”）
+            D：笑死
+            E：东西还在吗
+            D：苦力怕是你爹""", """
+            A：附魔台又给我出个耐久一
+            B：经典
+            A：三十级啊我
+            C：我刚出了个锋利四 嘿嘿""", """
+            A：今天作业写不完了
+            B：抄
+            A：没人给我抄
+            C：明天早八 先睡了""", """
+            A：lemon 你那边石头够没
+            B：差点 你先铺地板
+            A：行
+            C：我去下界拿石英 谁要
+            B：我要一组""", """
+            A：村民又涨价了
+            B：打他一顿就降了
+            A：真的假的
+            B：僵尸化再治好 我试过""", """
+            A：谁在主城附近
+            B：我
+            A：帮我开下门 被关外面了
+            B：你没手吗
+            A：门是你装的红石啊""", """
+            A：外面打雷了
+            B：苦力怕要变闪电苦力怕了
+            A：我在家
+            B：家也不安全""");
     record Settings(boolean enabled, String format, String endpoint, String apiKey, String model, double temperature,
                     int maxTokens, int timeoutSeconds, int perMinute, int perDay, boolean jsonMode, int historyLines,
-                    int maxLines, String serverInfo, List<String> personas, List<String> activities, List<String> memes, ZoneId zone) {
+                    int maxLines, String serverInfo, List<String> personas, List<String> activities, List<String> memes, List<String> topics,
+                    ZoneId zone) {
 
         static Settings read(ConfigurationSection yaml) {
             String format = yaml.getString("format", "openai").strip().toLowerCase(Locale.ROOT);
@@ -75,7 +126,7 @@ final class TestAi {
             return new Settings(yaml.getBoolean("enabled", false), format, endpoint(format, base), yaml.getString("api_key", "").strip(),
                 model, yaml.getDouble("temperature", 1.3), maxTokens, timeout, perMinute, perDay, yaml.getBoolean("json_mode", true),
                 history, lines, yaml.getString("server_info", "").strip(), list(yaml, "personas", List.of()),
-                list(yaml, "activities", DEFAULT_ACTIVITIES), list(yaml, "memes", DEFAULT_MEMES), zone);
+                list(yaml, "activities", DEFAULT_ACTIVITIES), list(yaml, "memes", DEFAULT_MEMES), list(yaml, "topics", DEFAULT_TOPICS), zone);
         }
 
         /** 字符串列表；没写这一项时用 fallback，写成 [] 表示不要。 */
@@ -96,8 +147,11 @@ final class TestAi {
         }
     }
 
-    /** 可以说话的测试假人：名字、性格、正在游戏里做的事、说明（如“被提到了”）。 */
-    record Candidate(String name, String persona, String activity, String note) { }
+    /**
+     * 可以说话的测试假人：名字、性格、打字习惯、心情、正在游戏里做的事、小队（如“摸鱼联盟，和 B、C 一队，一起在盖主城”，
+     * 不在小队里为空）、说明（如“被叫到了”）。
+     */
+    record Candidate(String name, String persona, String habit, String mood, String activity, String team, String note) { }
 
     /** AI 决定的一句话。 */
     record Reply(String speaker, String text) { }
@@ -148,30 +202,46 @@ final class TestAi {
 
     /**
      * 有玩家刚说了一句：决定要不要回、由谁回、说什么。crowd 大于 0 时是一窝蜂：让 crowd 个人各回一句。
-     * others 为除测试假人外在线的玩家数。
+     * spoken 为测试假人最近说过的话（从旧到新），others 为除测试假人外在线的玩家数。
      */
-    CompletableFuture<List<Reply>> reply(List<Candidate> candidates, List<TestChat.Said> history, String player, String text,
-                                         String mentioned, boolean othersTalking, int crowd, int others) {
+    CompletableFuture<List<Reply>> reply(List<Candidate> candidates, List<TestChat.Said> history, List<TestChat.Said> spoken, String player,
+                                         String text, String mentioned, boolean othersTalking, int crowd, int others) {
         var task = new StringBuilder("玩家 ").append(player).append(" 刚说：“").append(clean(text, 120)).append("”。\n");
         int max = 2;
-        if (mentioned != null) task.append("他叫到了 ").append(mentioned).append("，由 ").append(mentioned).append(" 回他。");
+        if (mentioned != null) task.append("他叫到了 ").append(mentioned).append("，由 ").append(mentioned)
+            .append(" 回他；和 ").append(mentioned).append(" 一个小队的人也可以顺嘴接一句，不接也行。");
         else if (othersTalking) task.append("别的玩家之间正在聊，除非和你扮演的人有关，否则别插话，返回空列表。");
         else if (crowd > 1) {
             max = crowd;
             task.append("这句话会让好几个人同时搭腔：让 ").append(crowd).append(" 个不同的人各回一句，说法、长短、语气都要不一样，")
                 .append("有人只回一两个字，有人吐槽或接梗，也可以有人跑题说自己的事。");
         } else task.append("决定要不要回、谁回、说什么。最多 2 句，可以一个人回，也可以两个人先后接话；没什么可接的就不回。");
-        return ask(candidates, history, task.toString(), max, others);
+        return ask(candidates, history, spoken, task.toString(), max, others);
     }
 
-    /** 冷场了：让测试假人自然地聊几句。crowd 时几个人你一句我一句很快地聊。 */
-    CompletableFuture<List<Reply>> idle(List<Candidate> candidates, List<TestChat.Said> history, int maxLines, boolean crowd, int others) {
+    /** 冷场了：让测试假人自然地聊几句。crowd 时几个人你一句我一句很快地聊。topics 为这次可以挑的话题方向。 */
+    CompletableFuture<List<Reply>> idle(List<Candidate> candidates, List<TestChat.Said> history, List<TestChat.Said> spoken, int maxLines,
+                                        boolean crowd, List<String> topics, int others) {
+        String hint = topics.isEmpty() ? "" : "这次可以从这几个方向里挑一个（也可以聊别的）：" + String.join("、", topics) + "。";
         String task = crowd
             ? "聊天区安静了一会儿。让 3 到 " + Math.max(3, maxLines) + " 个人你一句我一句很快地聊起来：一个人起个头，其他人抢着接，"
-                + "可以吐槽、接梗、互相损两句。话题跟各自正在做的事或者现在的时间有关，不要和最近的聊天重复。"
-            : "聊天区安静了一会儿。让你扮演的玩家自然地开个话题：可以一个人随口说一句跟自己正在做的事有关的话，也可以是 2 到 " + maxLines
-                + " 句的一问一答或小讨论，比如约人下矿、晒收获、吐槽死了、问哪有资源、聊建筑、说自己困了饿了。话题不要和最近的聊天重复。";
-        return ask(candidates, history, task, crowd ? Math.max(3, maxLines) : maxLines, others);
+                + "可以吐槽、接梗、互相损两句。" + hint + "话题不要和最近聊过的重复。"
+            : "聊天区安静了一会儿。让你扮演的玩家自然地开个话题：可以一个人随口说一句跟自己正在做的事或心情有关的话，也可以是 2 到 " + maxLines
+                + " 句的一问一答或小讨论。" + hint + "话题和说法不要和最近聊过的重复，不要老是问“有人一起xx吗”。";
+        return ask(candidates, history, spoken, task, crowd ? Math.max(3, maxLines) : maxLines, others);
+    }
+
+    /** 冷场了：让一个小队的几个人在公屏上聊他们小队的事。 */
+    CompletableFuture<List<Reply>> team(List<Candidate> candidates, List<TestChat.Said> history, List<TestChat.Said> spoken, String team,
+                                        String project, int maxLines, int others) {
+        var names = new ArrayList<String>();
+        for (Candidate candidate : candidates) names.add(candidate.name());
+        int lines = Math.max(2, maxLines);
+        String task = "聊天区安静了一会儿。让小队「" + team + "」的 " + String.join("、", names) + " 在公屏上聊几句他们小队的事"
+            + (project.isEmpty() ? "" : "（他们最近在" + project + "）") + "，2 到 " + lines + " 句。他们是一起玩的老熟人，说话随便："
+            + "可以分工（谁去挖矿谁去砍树）、说进度、催人、借东西、互损、吐槽队友、约时间、开小队内部的玩笑，叫对方用名字的一部分或外号。"
+            + "不要和最近聊过的重复。";
+        return ask(candidates, history, spoken, task, lines, others);
     }
 
     /** /afp test ai：发一个最简单的请求，确认地址、Key 和模型可用。结果为回复的文字。 */
@@ -180,16 +250,26 @@ final class TestAi {
         return call(s, "只回复两个字：正常", "测试", false, s.maxTokens()).thenApply(text -> clean(text, 60));
     }
 
-    private CompletableFuture<List<Reply>> ask(List<Candidate> candidates, List<TestChat.Said> history, String task, int maxLines, int others) {
+    private CompletableFuture<List<Reply>> ask(List<Candidate> candidates, List<TestChat.Said> history, List<TestChat.Said> spoken,
+                                               String task, int maxLines, int others) {
         Settings s = settings;
         var names = new HashMap<String, String>();
         var user = new StringBuilder("现在是").append(clock(s.zone())).append("，除了你扮演的人，服务器里还有 ").append(others)
-            .append(" 个玩家在线。\n\n你扮演的玩家（名字｜性格｜正在做的事｜备注）：\n");
+            .append(" 个玩家在线。\n\n你扮演的玩家（名字｜性格｜打字习惯｜心情｜正在做的事｜小队｜备注）：\n");
         for (Candidate candidate : candidates) {
             names.put(candidate.name().toLowerCase(Locale.ROOT), candidate.name());
             user.append("- ").append(candidate.name()).append("｜").append(candidate.persona().isEmpty() ? "普通玩家" : candidate.persona())
-                .append("｜").append(candidate.activity().isEmpty() ? "随便逛逛" : candidate.activity());
-            if (!candidate.note().isEmpty()) user.append("｜").append(candidate.note());
+                .append("｜").append(candidate.habit().isEmpty() ? "随便" : candidate.habit())
+                .append("｜").append(candidate.mood().isEmpty() ? "一般" : candidate.mood())
+                .append("｜").append(candidate.activity().isEmpty() ? "随便逛逛" : candidate.activity())
+                .append("｜").append(candidate.team().isEmpty() ? "没有" : candidate.team());
+            var mine = new ArrayList<String>();
+            for (int index = spoken.size() - 1; index >= 0 && mine.size() < 2; index--) {
+                if (spoken.get(index).name().equalsIgnoreCase(candidate.name())) mine.addFirst(clean(spoken.get(index).text(), 40));
+            }
+            String note = candidate.note();
+            if (!mine.isEmpty()) note = (note.isEmpty() ? "" : note + "；") + "刚才说过：" + String.join(" / ", mine);
+            if (!note.isEmpty()) user.append("｜").append(note);
             user.append('\n');
         }
         // 不标谁是测试假人：模型只需要知道自己扮演谁，标出来反而容易说漏
@@ -197,6 +277,13 @@ final class TestAi {
         var recent = history.subList(Math.max(0, history.size() - s.historyLines()), history.size());
         if (recent.isEmpty()) user.append("（没有）\n");
         for (TestChat.Said said : recent) user.append(said.name()).append("：").append(clean(said.text(), 120)).append('\n');
+        // 更早说过的话：只给内容，让 AI 别再说一样的、差不多的
+        var older = new ArrayList<String>();
+        for (TestChat.Said said : spoken) if (!recent.contains(said)) older.add(clean(said.text(), 30));
+        if (!older.isEmpty()) {
+            user.append("\n更早时候说过的话（别再说一样的或差不多的）：")
+                .append(String.join(" / ", older.subList(Math.max(0, older.size() - 25), older.size()))).append('\n');
+        }
         user.append("\n现在：").append(task).append("\n只输出 JSON。");
         return call(s, system(s, maxLines), user.toString(), true, s.maxTokens()).thenApply(text -> parse(text, names, maxLines));
     }
@@ -212,34 +299,40 @@ final class TestAi {
     }
 
     private static String system(Settings s, int maxLines) {
+        var examples = new ArrayList<>(EXAMPLES);
+        Collections.shuffle(examples, ThreadLocalRandom.current());
         return """
             你在 Minecraft 服务器的聊天区里同时扮演几个普通玩家，替他们决定谁说话、说什么。
             目标：让人看不出这几个人是同一个人扮演的，更看不出是 AI。
 
             说话方式（最重要）：
             - 像国内玩家边玩边打字：大多数消息只有 2～10 个字，偶尔长一点，不超过 25 个字。
+            - 每个人有自己的性格、打字习惯、心情和正在做的事，说话要和这些对得上；几个人的用词、长短、语气要明显不同。
             - 句末一般不加标点，很少用感叹号；别用“呢~”“哦~”“呀”“哈哈哈”这种腔调撑场面，除非这个人的性格就这样。
             - 随手打：可以省略主语、打错字、用拼音缩写（nb、xswl、u1s1），一个人也可以连发两条短消息把一句话说完。
-            - 很少叫对方名字，很少 @ 人，不要一上来就寒暄。
-            - 不要客服腔、不要说教、不要总结、不要热情过头，不要每句都附和；可以敷衍、吐槽、互损、答非所问、说不知道。
-            - 每个人有自己的性格和正在做的事，说话要和这两样对得上，几个人的说法和用词要明显不同。
+            - 叫人时多用名字的一部分或外号（比如 Lemon_lu 叫“lemon”），很少叫全名，很少 @ 人，不要一上来就寒暄。
+            - 不要客服腔、不要说教、不要总结、不要热情过头，不要每句都附和；可以敷衍、吐槽、互损、答非所问、说不知道、只回个“？”。
             - 时间要对得上：深夜可以说困了要睡，早上可以说早八，饭点可以说去吃饭。
-            - 接着最近的聊天往下说，不要重复别人或自己刚说过的话，也不要把对方的话复述一遍。
+            - 接着最近的聊天往下说，不要把对方的话复述一遍。
+
+            不要重复（很重要）：
+            - 不要说和聊天记录里、“刚才说过”、“更早时候说过的话”里一样或意思差不多的话，也别套同一个句式；
+              刚有人说过“笑死”，别人就别再说“笑死”，同一个人更不要把自己的话再说一遍。
+            - 同一个话题别反复提（比如一直说下矿、钻石、苦力怕），开话题时换着来，游戏里的事和现实里的事都可以聊。
+            - 回别人时别老用同一个开头（“哈哈”“确实”“6”“好家伙”）。
+
+            小队：
+            - 小队一栏写了小队的人，和队友是一起玩的老熟人：说话更随便，可以互损、开小队内部的玩笑、分工、说进度、催人、约时间。
+            - 和队友说话不用解释前因后果，别人看不懂也没关系。
 
             玩梗：
             - 国内玩家爱玩梗，大概每三四句里有一句带梗，网感强的人多用、老实人少用；同一个梗别反复用，用在点上，硬塞不如不用。
             - 这次可以挑着用的梗（不限于这些，也可以用别的常见梗；“xx”换成合适的词）：%s
 
-            语气参考（只学语气，不要照抄）：
-            A：有人一起下矿吗
-            B：等会 箱子还没整完
-            C：几层
-            A：-50左右
-            B：来了来了
-            （有人说“我又死了”）
-            D：笑死
-            E：东西还在吗
-            D：苦力怕是你爹
+            语气参考（只学语气，不要照抄里面的话）：
+            %s
+
+            %s
 
             什么时候不说话：
             - 不是每条消息都要有人回。和你扮演的人无关、没什么可接的，就返回空列表。
@@ -254,7 +347,8 @@ final class TestAi {
             %s
 
             只输出一个 JSON 对象，格式：{"lines":[{"speaker":"名字","text":"说的话"}]}
-            """.formatted(memes(s.memes()), maxLines, s.serverInfo().isEmpty() ? "（没有介绍）" : s.serverInfo());
+            """.formatted(memes(s.memes()), examples.get(0), examples.get(1), maxLines,
+                s.serverInfo().isEmpty() ? "（没有介绍）" : s.serverInfo());
     }
 
     /** 从梗表里随机挑一些，用顿号连起来；梗表为空时说明不用梗。 */

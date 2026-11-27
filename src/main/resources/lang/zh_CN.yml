@@ -1,5 +1,5 @@
 # 配置版本号，由插件自动管理，请勿修改。插件更新后会据此自动升级本文件，自定义内容保留
-config_version: 1
+config_version: 2
 
 # ============================================================
 # ALFakePlayer 中文消息 (lang/zh_CN.yml)
@@ -8,15 +8,20 @@ config_version: 1
 # %xxx% 为占位符，会被替换为实际内容，请保留
 # 在 config.yml 中设置 language: zh_CN 使用本文件
 # ============================================================
-benchmark_help: '&e用法：/afp test <数量>（1–%max%）让测试假人陆续进入 TAB；/afp test stop 清除；/afp test info <名字> 查看档案；/afp test group <名字> <组> 修改权限组；/afp test say <名字> <内容> 让它说一句；/afp test chat 查看聊天状态；/afp test ai 测试 AI 接口。'
+benchmark_help: '&e用法：/afp test <数量>（1–%max%）让测试假人陆续进入 TAB；/afp test stop 清除；/afp test info <名字> 查看档案；/afp test group <名字> <组> 修改权限组；/afp test say <名字> <内容> 让它说一句；/afp test chat 查看聊天状态；/afp test ai 测试 AI 接口；/afp test teams 查看小队。'
 benchmark_spawned: '&a已在 TAB 列表显示 %count% 个测试假人。'
 benchmark_ramping: '&a测试假人目标设为 %count% 人，约 %seconds% 秒内陆续进出完成。'
 benchmark_capped: '&e名字表里可用的名字只有这么多，目标改为 %count% 人。'
 benchmark_loading: '&e测试假人档案正在加载，请稍后再试。'
 benchmark_stopped: '&a已从 TAB 列表清除 %count% 个测试假人。'
 benchmark_not_found: '&c名字表（tab_test.yml）里没有 %name%。'
-benchmark_info_shown: '&a%name% &7权限组 &f%group%&7，%talk%，性格 &f%persona%&7，UUID &f%uuid%&7，正在 TAB 中。'
-benchmark_info_hidden: '&a%name% &7权限组 &f%group%&7，%talk%，性格 &f%persona%&7，UUID &f%uuid%&7，不在 TAB 中。'
+benchmark_info_shown: '&a%name% &7权限组 &f%group%&7，%talk%，性格 &f%persona%&7，小队 &f%team%&7，聊天频道 &f%channel%&7，UUID &f%uuid%&7，正在 TAB 中。'
+benchmark_info_hidden: '&a%name% &7权限组 &f%group%&7，%talk%，性格 &f%persona%&7，小队 &f%team%&7，聊天频道 &f%channel%&7，UUID &f%uuid%&7，不在 TAB 中。'
+benchmark_no_team: '无'
+benchmark_default_channel: '聊天插件默认'
+benchmark_teams_header: '&a测试假人小队（%count% 个，&a绿色&7为在 TAB 中&a）：'
+benchmark_teams_line: '&f%team% &8| %members% &8| &7最近在%project%'
+benchmark_teams_none: '&e还没有小队。tab_chat.yml 的 teams.enabled 为 true、percent 大于 0 时，/afp reload 后自动分队。'
 benchmark_group_set: '&a已把 %name% 的权限组改为 %group%，之后一直使用这个组。'
 benchmark_group_invalid: '&c%group% 不在 tab_test.yml 的 groups 里，或在 LuckPerms 中不存在。可用的组：%groups%'
 benchmark_talkative: '会说话'

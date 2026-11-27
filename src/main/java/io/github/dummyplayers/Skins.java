@@ -33,7 +33,9 @@ import java.util.logging.Level;
 import java.util.regex.Pattern;
 
 /**
- * 假人的皮肤。召唤的假人和 TAB 测试假人按 UUID 从皮肤名单里固定挑一项，套上它的皮肤；名单不变时同一个假人一直是同一个皮肤。
+ * 假人的皮肤。召唤的假人和 TAB 测试假人第一次用到时从皮肤名单里挑一项，记在数据库里（跨服共用），之后一直用它。
+ * 挑的时候选用的人最少的一项，名单够用时不会有两个假人同一个皮肤；名单比假人少时尽量平均。
+ * 挑中的一项被移出名单、或者确定没有这个皮肤时，重新挑一项。
  *
  * <p>名单里是正版玩家名（装了 SkinsRestorer 时还可以是皮肤图片链接）。装了 SkinsRestorer 时通过它的接口获取，
  * 用它的缓存、代理和 MineSkin 设置；没装或它的接口不可用（例如只装在代理端）时直接问 Mojang。
@@ -44,6 +46,11 @@ final class Skins {
     /** 两次获取之间的间隔；获取失败后多久重试；没有正版账号的名字多久后再查一次。 */
     private static final long SPACING_MILLIS = 1_200, RETRY_MILLIS = 10 * 60_000L, MISSING_MILLIS = 7 * 86_400_000L;
     private static final int MAX_FAILURES = 3;
+    /** 多久内用到过的假人算“在用”，挑皮肤时算进使用人数；多久没用过的记录删掉；最近一次用到的时间多久写一次数据库。 */
+    private static final long ACTIVE_MILLIS = 7 * 86_400_000L, TOUCH_MILLIS = 12 * 3_600_000L;
+    private static final int FORGET_DAYS = 60;
+    /** 皮肤记录还没从数据库读出来时，ready 等的“名单项”。 */
+    private static final String LOADING = "\u0000loading";
     private static final Pattern NAME = Pattern.compile("[A-Za-z0-9_]{1,16}");
     private static final String CACHE = "skin-cache.yml";
 
@@ -64,6 +71,11 @@ final class Skins {
     /** 等某一项获取结果的召唤：名单项 → 获取结束后要执行的动作。 */
     private final Map<String, Queue<Runnable>> waiters = new ConcurrentHashMap<>();
     private volatile List<String> pool = List.of();
+    /** pool 中各项的 key。 */
+    private volatile Set<String> poolKeys = Set.of();
+    /** 每个假人用的名单项（key）；受 choices 锁保护。数据库读出来之前为 null。 */
+    private Map<UUID, Roster.SkinChoice> choices;
+    private volatile boolean warnedStorage;
     private volatile boolean enabled;
     private volatile boolean dirty, warnedSkinsRestorer, warnedNetwork;
     /** 最近一次获取到新皮肤的时间，TAB 测试条目据此刷新。 */
@@ -90,6 +102,9 @@ final class Skins {
             next.add(entry);
         }
         pool = List.copyOf(next);
+        var keys = new HashSet<String>();
+        for (String entry : next) keys.add(key(entry));
+        poolKeys = Set.copyOf(keys);
         enabled = on && !next.isEmpty();
         if (worker == null) {
             load();
@@ -115,6 +130,19 @@ final class Skins {
     void close() {
         if (worker != null) { worker.shutdownNow(); worker = null; }
         save();
+    }
+
+    /** 数据库打开后调用：读出每个假人用的皮肤。读完之前假人先用默认皮肤，召唤的假人最多等 4 秒（见 ready）。 */
+    void attach(Roster roster) {
+        roster.loadSkins(FORGET_DAYS).whenComplete((stored, error) -> {
+            if (error != null) plugin.getLogger().log(Level.WARNING, "Could not read the fake player skins from the database;"
+                + " skins chosen now are not shared with other servers", error);
+            synchronized (this) {
+                choices = new HashMap<>(error == null ? stored : Map.of());
+            }
+            changedAt = System.currentTimeMillis();
+            finished(LOADING);
+        });
     }
 
     // ══ 给假人挑皮肤 ══════════════════════════════════════
@@ -147,28 +175,103 @@ final class Skins {
         if (pending != null) pending.forEach(Runnable::run);
     }
 
-    /** 按 UUID 挑皮肤。挑中的一项还不知道有没有时返回 null，并把它的 key 放进 waiting[0]（waiting 不为 null 时）。 */
+    /** 这个假人的皮肤。挑中的一项还不知道有没有时返回 null，并把它的 key 放进 waiting[0]（waiting 不为 null 时）。 */
     private Texture pick(UUID id, String[] waiting) {
-        List<String> names = pool;
-        if (!enabled || names.isEmpty()) return null;
-        int start = (int) Math.floorMod(id.getMostSignificantBits() ^ id.getLeastSignificantBits() * 0x9E3779B97F4A7C15L, (long) names.size());
-        for (int step = 0; step < names.size(); step++) {
-            String entry = names.get((start + step) % names.size());
-            String key = key(entry);
-            Texture texture = textures.get(key);
-            if (texture != null) return texture;
-            if (missing.containsKey(key)) continue;
-            // 还不知道有没有：先用默认皮肤，把它提到最前面去获取。不跳到后面已获取的，免得以后换来换去
-            synchronized (queue) {
-                if (queue.peekFirst() == null || !key(queue.peekFirst()).equals(key)) {
-                    queue.removeIf(queued -> key(queued).equals(key));
-                    queue.addFirst(entry);
-                }
-            }
-            if (waiting != null) waiting[0] = key;
+        if (!enabled || pool.isEmpty()) return null;
+        String key = choice(id);
+        if (key == null) {
+            if (waiting != null && choices() == null) waiting[0] = LOADING;
             return null;
         }
+        Texture texture = textures.get(key);
+        if (texture != null) return texture;
+        // 还不知道有没有：先用默认皮肤，把它提到最前面去获取
+        String entry = null;
+        for (String candidate : pool) if (key(candidate).equals(key)) { entry = candidate; break; }
+        if (entry != null) synchronized (queue) {
+            if (queue.peekFirst() == null || !key(queue.peekFirst()).equals(key)) {
+                queue.removeIf(queued -> key(queued).equals(key));
+                queue.addFirst(entry);
+            }
+        }
+        if (waiting != null) waiting[0] = key;
         return null;
+    }
+
+    private synchronized Map<UUID, Roster.SkinChoice> choices() { return choices; }
+
+    /** 名单里有、而且没确定没有这个皮肤的项。 */
+    private boolean usable(String key) { return poolKeys.contains(key) && !missing.containsKey(key); }
+
+    /** 这个假人用的名单项：记下的还能用就用它，否则重新挑一项并记下。数据库还没读出来、或名单里一项都用不了时为 null。 */
+    private String choice(UUID id) {
+        long now = System.currentTimeMillis();
+        String chosen, previous;
+        synchronized (this) {
+            if (choices == null) return null;
+            Roster.SkinChoice current = choices.get(id);
+            if (current != null && usable(current.entry())) {
+                if (now - current.used() > TOUCH_MILLIS) {
+                    choices.put(id, new Roster.SkinChoice(current.entry(), now));
+                    if (plugin.roster != null) plugin.roster.touchSkin(id);
+                }
+                return current.entry();
+            }
+            chosen = leastUsed(id, now);
+            if (chosen == null) return null;
+            previous = current == null ? null : current.entry();
+            choices.put(id, new Roster.SkinChoice(chosen, now));
+        }
+        if (plugin.roster != null) store(id, chosen, previous);
+        return chosen;
+    }
+
+    /** 用的人最少的一项；一样少时先选已经获取到的（马上能换上），再按 UUID 打散。 */
+    private String leastUsed(UUID id, long now) {
+        var usage = new HashMap<String, Integer>();
+        for (var choice : choices.values()) if (now - choice.used() < ACTIVE_MILLIS) usage.merge(choice.entry(), 1, Integer::sum);
+        String best = null;
+        int bestUsage = 0;
+        boolean bestFetched = false;
+        long bestOrder = 0;
+        for (String entry : pool) {
+            String key = key(entry);
+            if (missing.containsKey(key)) continue;
+            int used = usage.getOrDefault(key, 0);
+            boolean fetched = textures.containsKey(key);
+            long order = mix(id, key);
+            if (best == null || used < bestUsage || used == bestUsage && (fetched && !bestFetched || fetched == bestFetched && order < bestOrder)) {
+                best = key;
+                bestUsage = used;
+                bestFetched = fetched;
+                bestOrder = order;
+            }
+        }
+        return best;
+    }
+
+    private static long mix(UUID id, String key) {
+        long mixed = id.getMostSignificantBits() * 0x9E3779B97F4A7C15L ^ id.getLeastSignificantBits() ^ key.hashCode() * 0xC2B2AE3D27D4EB4FL;
+        mixed ^= mixed >>> 31;
+        mixed *= 0xBF58476D1CE4E5B9L;
+        return mixed ^ mixed >>> 29;
+    }
+
+    /** 写进数据库。其他子服已经给这个假人挑了别的、而本服也能用时，改用那一项。 */
+    private void store(UUID id, String chosen, String previous) {
+        plugin.roster.claimSkin(id, chosen, previous).whenComplete((stored, error) -> {
+            if (error != null) {
+                if (!warnedStorage) {
+                    warnedStorage = true;
+                    plugin.getLogger().log(Level.WARNING, "Could not save the skin of a fake player; it may differ between servers", error);
+                }
+                return;
+            }
+            if (stored.equals(chosen) || !usable(stored)) return;
+            synchronized (this) { choices.put(id, new Roster.SkinChoice(stored, System.currentTimeMillis())); }
+            changedAt = System.currentTimeMillis();
+            finished(chosen);
+        });
     }
 
     PropertyMap properties(UUID id) { return properties(texture(id)); }
@@ -237,6 +340,7 @@ final class Skins {
             changedAt = System.currentTimeMillis();
         } else {
             missing.put(key, System.currentTimeMillis());
+            changedAt = System.currentTimeMillis(); // 挑中它的假人改挑别的
         }
         dirty = true;
         finished(key);

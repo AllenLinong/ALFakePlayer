@@ -1,6 +1,6 @@
 # Config version, managed by the plugin. Do not edit. Used to upgrade this file automatically
 # after a plugin update; your changes are kept
-config_version: 1
+config_version: 2
 
 # ============================================================
 # ALFakePlayer English messages (lang/en_US.yml)
@@ -9,15 +9,20 @@ config_version: 1
 # %xxx% are placeholders replaced at runtime; keep them
 # Set language: en_US in config.yml to use this file
 # ============================================================
-benchmark_help: '&eUsage: /afp test <count> (1–%max%) lets test players join the TAB list over time; /afp test stop clears them; /afp test info <name> shows a profile; /afp test group <name> <group> changes its group; /afp test say <name> <text> makes one speak; /afp test chat shows the chat status; /afp test ai tests the AI endpoint.'
+benchmark_help: '&eUsage: /afp test <count> (1–%max%) lets test players join the TAB list over time; /afp test stop clears them; /afp test info <name> shows a profile; /afp test group <name> <group> changes its group; /afp test say <name> <text> makes one speak; /afp test chat shows the chat status; /afp test ai tests the AI endpoint; /afp test teams lists the teams.'
 benchmark_spawned: '&aShowing %count% test players in the TAB list.'
 benchmark_ramping: '&aTarget set to %count% test players; they join or leave over about %seconds% seconds.'
 benchmark_capped: '&eNot enough free names; the target is now %count%.'
 benchmark_loading: '&eTest player profiles are still loading. Try again shortly.'
 benchmark_stopped: '&aRemoved %count% test players from the TAB list.'
 benchmark_not_found: '&c%name% is not in the name list (tab_test.yml).'
-benchmark_info_shown: '&a%name% &7group &f%group%&7, %talk%, persona &f%persona%&7, UUID &f%uuid%&7, in the TAB list.'
-benchmark_info_hidden: '&a%name% &7group &f%group%&7, %talk%, persona &f%persona%&7, UUID &f%uuid%&7, not in the TAB list.'
+benchmark_info_shown: '&a%name% &7group &f%group%&7, %talk%, persona &f%persona%&7, team &f%team%&7, chat channel &f%channel%&7, UUID &f%uuid%&7, in the TAB list.'
+benchmark_info_hidden: '&a%name% &7group &f%group%&7, %talk%, persona &f%persona%&7, team &f%team%&7, chat channel &f%channel%&7, UUID &f%uuid%&7, not in the TAB list.'
+benchmark_no_team: 'none'
+benchmark_default_channel: 'chat plugin default'
+benchmark_teams_header: '&aTest player teams (%count%, &agreen&7 = in the TAB list&a):'
+benchmark_teams_line: '&f%team% &8| %members% &8| &7lately: %project%'
+benchmark_teams_none: '&eNo teams yet. With teams.enabled: true and percent above 0 in tab_chat.yml, teams are formed on /afp reload.'
 benchmark_group_set: '&a%name% now uses group %group% from now on.'
 benchmark_group_invalid: '&c%group% is not in groups in tab_test.yml or does not exist in LuckPerms. Available groups: %groups%'
 benchmark_talkative: 'talkative'

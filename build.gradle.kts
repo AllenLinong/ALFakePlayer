@@ -3,10 +3,12 @@ plugins {
     id("com.gradleup.shadow") version "9.6.1"
 }
 group = "io.github.dummyplayers"
-version = "1.0.5"
+version = "1.0.6"
 repositories {
     mavenCentral()
     maven("https://repo.extendedclip.com/releases/")
+    // 米饭插件（handyplus）：PlayerTitle 称号插件
+    maven("https://maven.cnb.cool/handyplus/maven/-/packages/")
 }
 val paperHome = providers.gradleProperty("paperHome").orElse(providers.environmentVariable("PAPER_HOME"))
 dependencies {
@@ -19,6 +21,7 @@ dependencies {
     compileOnly(fileTree("$home/libraries/io/papermc/paper/paper-api") { include("26.1.2*/**/*.jar") })
     compileOnly("net.luckperms:api:5.4")
     compileOnly("me.clip:placeholderapi:2.12.3")
+    compileOnly("cn.handyplus.title:PlayerTitle:5.5.8") { isTransitive = false }
     // MySQL 连接池。MySQL 与 SQLite 驱动由 Paper 自带，slf4j 由 Paper 提供
     implementation("com.zaxxer:HikariCP:6.3.0") { exclude(group = "org.slf4j") }
 }

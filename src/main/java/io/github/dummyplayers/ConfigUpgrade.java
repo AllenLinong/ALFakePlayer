@@ -38,7 +38,7 @@ final class ConfigUpgrade {
      * 键由用户自己定的段落（如测试假人的权限组和比例）：改过就整段沿用，不和新默认值逐项合并，
      * 否则用户删掉的默认项（如 default 组）会被加回来。
      */
-    private static final Map<String, Set<String>> WHOLE_SECTIONS = Map.of("tab_test.yml", Set.of("groups"));
+    private static final Map<String, Set<String>> WHOLE_SECTIONS = Map.of("tab_test.yml", Set.of("groups"), "tab_chat.yml", Set.of("channels"));
 
     /** 配置版本。dotted 为 1.0.4 写出的插件版本号，当作 1。 */
     record Version(int number, boolean dotted) {
