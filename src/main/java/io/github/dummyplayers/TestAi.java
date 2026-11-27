@@ -14,11 +14,15 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.net.http.HttpTimeoutException;
 import java.nio.charset.StandardCharsets;
+import java.time.DateTimeException;
 import java.time.Duration;
 import java.time.LocalDate;
+import java.time.ZoneId;
+import java.time.ZonedDateTime;
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.regex.Pattern;
 
 /**
@@ -27,10 +31,24 @@ import java.util.regex.Pattern;
  */
 final class TestAi {
     private static final Pattern COLOR = Pattern.compile("[&§][0-9a-fk-orxA-FK-ORX]");
+    /** 每次请求从梗表里随机挑这么多个给 AI，免得总用同几个。 */
+    private static final int MEMES_PER_REQUEST = 15;
+    /** tab_chat.yml 没写 ai.activities 时测试假人“正在做的事”。 */
+    static final List<String> DEFAULT_ACTIVITIES = List.of("在矿洞挖矿", "在下界找要塞", "在家盖房子", "在河边钓鱼", "在种田",
+        "在刷怪塔挂机", "在整理箱子", "在跑图找村庄", "在附魔", "在弄红石机器", "在养动物", "在和村民交易", "在砍树",
+        "在挖地下通道", "在装修房子", "在海底找遗迹", "在刷铁机旁边挂机", "人不在电脑前，挂着机");
+    /** tab_chat.yml 没写 ai.memes 时的梗表。 */
+    static final List<String> DEFAULT_MEMES = List.of("6", "666", "典", "典中典", "急了急了", "绷不住了", "蚌埠住了", "乐",
+        "笑死", "笑不活了", "好家伙", "啊对对对", "你说得对", "破防了", "草（一种植物）", "xswl", "yyds", "u1s1", "赢麻了",
+        "小丑竟是我自己", "这波血亏", "白给", "开摆", "摆烂了", "尊嘟假嘟", "我真的会谢", "家人们谁懂啊", "不是哥们",
+        "有点东西", "主打一个xx", "一整个xx住了", "DNA动了", "包的", "闹麻了", "芜湖起飞", "夺笋啊", "泰裤辣", "xx，启动！",
+        "苦力怕：嘶~", "挖到钻石下一秒掉岩浆", "别挖脚下的方块", "床在下界会炸", "别和末影人对视", "三十级附魔出个效率一",
+        "钓鱼佬永不空军", "村民：嗯？", "红石大佬带带我", "一镐下去全是石头", "背包满了啥都舍不得扔", "狗又掉岩浆了",
+        "苦力怕是我爹", "钻石！（史蒂夫音）");
 
     record Settings(boolean enabled, String format, String endpoint, String apiKey, String model, double temperature,
                     int maxTokens, int timeoutSeconds, int perMinute, int perDay, boolean jsonMode, int historyLines,
-                    int maxLines, String serverInfo, List<String> personas) {
+                    int maxLines, String serverInfo, List<String> personas, List<String> activities, List<String> memes, ZoneId zone) {
 
         static Settings read(ConfigurationSection yaml) {
             String format = yaml.getString("format", "openai").strip().toLowerCase(Locale.ROOT);
@@ -51,11 +69,21 @@ final class TestAi {
                 throw new IllegalArgumentException("tab_chat.yml: ai.max_tokens >= 50, timeout_seconds 1-120, max_calls_per_minute >= 1,"
                     + " daily_call_limit >= 1, history_lines 0-40, max_lines 1-8");
             }
-            var personas = new ArrayList<String>();
-            for (String persona : yaml.getStringList("personas")) if (!persona.isBlank()) personas.add(persona.strip());
+            ZoneId zone;
+            try { zone = ZoneId.of(yaml.getString("timezone", "Asia/Shanghai").strip()); }
+            catch (DateTimeException invalid) { throw new IllegalArgumentException("tab_chat.yml: ai.timezone must be a time zone like Asia/Shanghai"); }
             return new Settings(yaml.getBoolean("enabled", false), format, endpoint(format, base), yaml.getString("api_key", "").strip(),
                 model, yaml.getDouble("temperature", 1.3), maxTokens, timeout, perMinute, perDay, yaml.getBoolean("json_mode", true),
-                history, lines, yaml.getString("server_info", "").strip(), List.copyOf(personas));
+                history, lines, yaml.getString("server_info", "").strip(), list(yaml, "personas", List.of()),
+                list(yaml, "activities", DEFAULT_ACTIVITIES), list(yaml, "memes", DEFAULT_MEMES), zone);
+        }
+
+        /** 字符串列表；没写这一项时用 fallback，写成 [] 表示不要。 */
+        private static List<String> list(ConfigurationSection yaml, String path, List<String> fallback) {
+            if (!yaml.contains(path)) return fallback;
+            var result = new ArrayList<String>();
+            for (String item : yaml.getStringList(path)) if (!item.isBlank()) result.add(item.strip());
+            return List.copyOf(result);
         }
 
         /** 补全接口路径：https://api.deepseek.com → …/chat/completions，https://api.anthropic.com → …/v1/messages；已写全的原样使用。 */
@@ -68,8 +96,8 @@ final class TestAi {
         }
     }
 
-    /** 可以说话的测试假人：名字、性格、说明（如“被提到了”）。 */
-    record Candidate(String name, String persona, String note) { }
+    /** 可以说话的测试假人：名字、性格、正在游戏里做的事、说明（如“被提到了”）。 */
+    record Candidate(String name, String persona, String activity, String note) { }
 
     /** AI 决定的一句话。 */
     record Reply(String speaker, String text) { }
@@ -118,23 +146,32 @@ final class TestAi {
 
     // ══ 任务 ══════════════════════════════════════════════
 
-    /** 真人刚说了一句：决定要不要回、由谁回、说什么。 */
+    /**
+     * 有玩家刚说了一句：决定要不要回、由谁回、说什么。crowd 大于 0 时是一窝蜂：让 crowd 个人各回一句。
+     * others 为除测试假人外在线的玩家数。
+     */
     CompletableFuture<List<Reply>> reply(List<Candidate> candidates, List<TestChat.Said> history, String player, String text,
-                                         String mentioned, boolean othersTalking) {
-        var task = new StringBuilder("真实玩家 ").append(player).append(" 刚说：“").append(clean(text, 120)).append("”。\n");
-        if (mentioned != null) task.append("他提到了 ").append(mentioned).append("，应该由 ").append(mentioned).append(" 回复。\n");
-        else if (othersTalking) task.append("真实玩家之间正在聊天，除非话题和测试玩家有关，否则不要插话，返回空列表。\n");
-        task.append("决定要不要回复、由谁回复、说什么。最多 2 句，可以一个人回，也可以两个人先后接话；不是每句都要回。");
-        return ask(candidates, history, task.toString(), 2);
+                                         String mentioned, boolean othersTalking, int crowd, int others) {
+        var task = new StringBuilder("玩家 ").append(player).append(" 刚说：“").append(clean(text, 120)).append("”。\n");
+        int max = 2;
+        if (mentioned != null) task.append("他叫到了 ").append(mentioned).append("，由 ").append(mentioned).append(" 回他。");
+        else if (othersTalking) task.append("别的玩家之间正在聊，除非和你扮演的人有关，否则别插话，返回空列表。");
+        else if (crowd > 1) {
+            max = crowd;
+            task.append("这句话会让好几个人同时搭腔：让 ").append(crowd).append(" 个不同的人各回一句，说法、长短、语气都要不一样，")
+                .append("有人只回一两个字，有人吐槽或接梗，也可以有人跑题说自己的事。");
+        } else task.append("决定要不要回、谁回、说什么。最多 2 句，可以一个人回，也可以两个人先后接话；没什么可接的就不回。");
+        return ask(candidates, history, task.toString(), max, others);
     }
 
-    /** 冷场了：让测试假人自然地聊几句。 */
-    CompletableFuture<List<Reply>> idle(List<TestChat.Speaker> speakers, List<TestChat.Said> history, int maxLines) {
-        var candidates = new ArrayList<Candidate>();
-        for (TestChat.Speaker speaker : speakers) candidates.add(new Candidate(speaker.name(), speaker.persona(), ""));
-        String task = "聊天区安静了一会儿。让上面的测试玩家自然地聊几句：可以是一个人随口说一句，也可以是 2 到 " + maxLines
-            + " 句的一问一答或小讨论，比如约人挖矿、晒收获、吐槽死亡、问哪里有资源、聊建筑。话题不要和最近的聊天重复。";
-        return ask(candidates, history, task, maxLines);
+    /** 冷场了：让测试假人自然地聊几句。crowd 时几个人你一句我一句很快地聊。 */
+    CompletableFuture<List<Reply>> idle(List<Candidate> candidates, List<TestChat.Said> history, int maxLines, boolean crowd, int others) {
+        String task = crowd
+            ? "聊天区安静了一会儿。让 3 到 " + Math.max(3, maxLines) + " 个人你一句我一句很快地聊起来：一个人起个头，其他人抢着接，"
+                + "可以吐槽、接梗、互相损两句。话题跟各自正在做的事或者现在的时间有关，不要和最近的聊天重复。"
+            : "聊天区安静了一会儿。让你扮演的玩家自然地开个话题：可以一个人随口说一句跟自己正在做的事有关的话，也可以是 2 到 " + maxLines
+                + " 句的一问一答或小讨论，比如约人下矿、晒收获、吐槽死了、问哪有资源、聊建筑、说自己困了饿了。话题不要和最近的聊天重复。";
+        return ask(candidates, history, task, crowd ? Math.max(3, maxLines) : maxLines, others);
     }
 
     /** /afp test ai：发一个最简单的请求，确认地址、Key 和模型可用。结果为回复的文字。 */
@@ -143,44 +180,89 @@ final class TestAi {
         return call(s, "只回复两个字：正常", "测试", false, s.maxTokens()).thenApply(text -> clean(text, 60));
     }
 
-    private CompletableFuture<List<Reply>> ask(List<Candidate> candidates, List<TestChat.Said> history, String task, int maxLines) {
+    private CompletableFuture<List<Reply>> ask(List<Candidate> candidates, List<TestChat.Said> history, String task, int maxLines, int others) {
         Settings s = settings;
         var names = new HashMap<String, String>();
-        var user = new StringBuilder("测试玩家（名字｜性格｜说明）：\n");
+        var user = new StringBuilder("现在是").append(clock(s.zone())).append("，除了你扮演的人，服务器里还有 ").append(others)
+            .append(" 个玩家在线。\n\n你扮演的玩家（名字｜性格｜正在做的事｜备注）：\n");
         for (Candidate candidate : candidates) {
             names.put(candidate.name().toLowerCase(Locale.ROOT), candidate.name());
-            user.append("- ").append(candidate.name()).append("｜").append(candidate.persona().isEmpty() ? "普通玩家" : candidate.persona());
+            user.append("- ").append(candidate.name()).append("｜").append(candidate.persona().isEmpty() ? "普通玩家" : candidate.persona())
+                .append("｜").append(candidate.activity().isEmpty() ? "随便逛逛" : candidate.activity());
             if (!candidate.note().isEmpty()) user.append("｜").append(candidate.note());
             user.append('\n');
         }
-        user.append("\n最近的聊天（从旧到新，[玩家] 是真实玩家，[测试] 是测试玩家）：\n");
+        // 不标谁是测试假人：模型只需要知道自己扮演谁，标出来反而容易说漏
+        user.append("\n最近的聊天（从旧到新）：\n");
         var recent = history.subList(Math.max(0, history.size() - s.historyLines()), history.size());
         if (recent.isEmpty()) user.append("（没有）\n");
-        for (TestChat.Said said : recent) {
-            user.append(said.real() ? "[玩家] " : "[测试] ").append(said.name()).append("：").append(clean(said.text(), 120)).append('\n');
-        }
+        for (TestChat.Said said : recent) user.append(said.name()).append("：").append(clean(said.text(), 120)).append('\n');
         user.append("\n现在：").append(task).append("\n只输出 JSON。");
         return call(s, system(s, maxLines), user.toString(), true, s.maxTokens()).thenApply(text -> parse(text, names, maxLines));
     }
 
+    /** 例如“星期六 23:40（深夜）”。 */
+    private static String clock(ZoneId zone) {
+        ZonedDateTime now = ZonedDateTime.now(zone);
+        int hour = now.getHour();
+        String part = hour < 5 ? "凌晨" : hour < 8 ? "早上" : hour < 11 ? "上午" : hour < 13 ? "中午" : hour < 17 ? "下午"
+            : hour < 19 ? "傍晚" : hour < 23 ? "晚上" : "深夜";
+        String day = "一二三四五六日".charAt(now.getDayOfWeek().getValue() - 1) + "";
+        return "星期" + day + " " + String.format("%02d:%02d", hour, now.getMinute()) + "（" + part + "）";
+    }
+
     private static String system(Settings s, int maxLines) {
         return """
-            你负责一个 Minecraft 服务器聊天区里几位“测试玩家”的发言：决定谁说话、说什么，让聊天区像真人玩家在聊天。
-            写法：
-            - 每句不超过 20 个字，像国内玩家打字：常常不加标点，可以用“哈哈”“6”“笑死”“？”，不用书面语，不要每句都礼貌完整。
-            - 每个测试玩家按自己的性格说话，不同的人风格要有区别。
-            - 要接得上最近的聊天，不要重复别人或自己刚说过的话。
-            - 不是每条消息都要回，没什么可说就返回空列表。最多 %d 句。
-            - speaker 只能用给出的测试玩家名字，不能替真实玩家说话。
+            你在 Minecraft 服务器的聊天区里同时扮演几个普通玩家，替他们决定谁说话、说什么。
+            目标：让人看不出这几个人是同一个人扮演的，更看不出是 AI。
+
+            说话方式（最重要）：
+            - 像国内玩家边玩边打字：大多数消息只有 2～10 个字，偶尔长一点，不超过 25 个字。
+            - 句末一般不加标点，很少用感叹号；别用“呢~”“哦~”“呀”“哈哈哈”这种腔调撑场面，除非这个人的性格就这样。
+            - 随手打：可以省略主语、打错字、用拼音缩写（nb、xswl、u1s1），一个人也可以连发两条短消息把一句话说完。
+            - 很少叫对方名字，很少 @ 人，不要一上来就寒暄。
+            - 不要客服腔、不要说教、不要总结、不要热情过头，不要每句都附和；可以敷衍、吐槽、互损、答非所问、说不知道。
+            - 每个人有自己的性格和正在做的事，说话要和这两样对得上，几个人的说法和用词要明显不同。
+            - 时间要对得上：深夜可以说困了要睡，早上可以说早八，饭点可以说去吃饭。
+            - 接着最近的聊天往下说，不要重复别人或自己刚说过的话，也不要把对方的话复述一遍。
+
+            玩梗：
+            - 国内玩家爱玩梗，大概每三四句里有一句带梗，网感强的人多用、老实人少用；同一个梗别反复用，用在点上，硬塞不如不用。
+            - 这次可以挑着用的梗（不限于这些，也可以用别的常见梗；“xx”换成合适的词）：%s
+
+            语气参考（只学语气，不要照抄）：
+            A：有人一起下矿吗
+            B：等会 箱子还没整完
+            C：几层
+            A：-50左右
+            B：来了来了
+            （有人说“我又死了”）
+            D：笑死
+            E：东西还在吗
+            D：苦力怕是你爹
+
+            什么时候不说话：
+            - 不是每条消息都要有人回。和你扮演的人无关、没什么可接的，就返回空列表。
+            - 有人问谁是机器人、假人、AI、脚本、托时，不回答，返回空列表。
+
             必须遵守：
+            - speaker 只能用“你扮演的玩家”里的名字，不能替别人说话；text 里不要带说话人的名字。最多 %d 句。
             - 不承诺给任何物品、金钱、权限或坐标；不冒充管理员或服主；不编造服务器介绍里没有的指令、活动或规则。
-            - 不谈政治、色情、暴力、赌博、诈骗，不骂人，不发链接。
-            - 有人问谁是机器人、假人、AI 或脚本时，不回答这类问题，返回空列表。
-            - 不要输出颜色代码或换行。
+            - 不谈政治、色情、暴力、赌博、诈骗，不骂人，不发链接，不输出颜色代码或换行。
+
             服务器介绍：
             %s
+
             只输出一个 JSON 对象，格式：{"lines":[{"speaker":"名字","text":"说的话"}]}
-            """.formatted(maxLines, s.serverInfo().isEmpty() ? "（没有介绍）" : s.serverInfo());
+            """.formatted(memes(s.memes()), maxLines, s.serverInfo().isEmpty() ? "（没有介绍）" : s.serverInfo());
+    }
+
+    /** 从梗表里随机挑一些，用顿号连起来；梗表为空时说明不用梗。 */
+    private static String memes(List<String> all) {
+        if (all.isEmpty()) return "（这次不用梗）";
+        var picked = new ArrayList<>(all);
+        Collections.shuffle(picked, ThreadLocalRandom.current());
+        return String.join("、", picked.subList(0, Math.min(MEMES_PER_REQUEST, picked.size())));
     }
 
     /** 解析 AI 的回复：去掉代码块，取第一个 { 到最后一个 }；名字必须是给出的测试假人，文字去掉颜色代码并截短。 */
@@ -198,11 +280,27 @@ final class TestAi {
             if (!element.isJsonObject() || result.size() >= maxLines) continue;
             JsonObject line = element.getAsJsonObject();
             String speaker = line.has("speaker") && line.get("speaker").isJsonPrimitive() ? line.get("speaker").getAsString().strip() : "";
-            String said = line.has("text") && line.get("text").isJsonPrimitive() ? clean(line.get("text").getAsString(), 40) : "";
+            String said = line.has("text") && line.get("text").isJsonPrimitive() ? humanize(clean(line.get("text").getAsString(), 40), names) : "";
             String name = names.get(speaker.toLowerCase(Locale.ROOT));
             if (name == null || said.isEmpty() || said.contains("http")) continue;
             result.add(new Reply(name, said));
         }
+        return result;
+    }
+
+    /**
+     * 去掉 AI 常见的破绽：开头带上说话人的名字（“A_Ye：在的”）、整句加引号、句末的句号逗号。
+     * 问号、感叹号、省略号保留，那是语气。
+     */
+    static String humanize(String text, Map<String, String> names) {
+        String result = text.strip();
+        int full = result.indexOf('：'), half = result.indexOf(':');
+        int colon = full < 0 ? half : half < 0 ? full : Math.min(full, half);
+        if (colon > 0 && names.containsKey(result.substring(0, colon).strip().toLowerCase(Locale.ROOT))) result = result.substring(colon + 1).strip();
+        if (result.length() >= 2 && "“\"「'".indexOf(result.charAt(0)) >= 0 && "”\"」'".indexOf(result.charAt(result.length() - 1)) >= 0) {
+            result = result.substring(1, result.length() - 1).strip();
+        }
+        while (!result.isEmpty() && "。，,．".indexOf(result.charAt(result.length() - 1)) >= 0) result = result.substring(0, result.length() - 1).strip();
         return result;
     }
 

@@ -395,6 +395,18 @@ final class TestChat implements Listener {
         return personas.isEmpty() ? "" : personas.get(trait(id, 2) % personas.size());
     }
 
+    /** 测试假人现在在游戏里做什么（给 AI 看）：每人每 30～60 分钟换一件，由 UUID 和时间算出，不用存。 */
+    String activity(UUID id) {
+        Settings s = settings;
+        var activities = s == null ? List.<String>of() : s.ai().activities();
+        if (activities.isEmpty()) return "";
+        long period = 30 + trait(id, 5) % 31;
+        long bucket = (System.currentTimeMillis() / 60_000 + trait(id, 6)) / period;
+        long mixed = (id.getMostSignificantBits() ^ id.getLeastSignificantBits()) + bucket * 0x9E3779B97F4A7C15L;
+        mixed ^= mixed >>> 31;
+        return activities.get((int) Math.floorMod(mixed * 0xBF58476D1CE4E5B9L >>> 17, (long) activities.size()));
+    }
+
     // ══ 定时器 ════════════════════════════════════════════
 
     private void tick() {
@@ -435,7 +447,7 @@ final class TestChat implements Listener {
             }
             if (real > 0 && pending.isEmpty() && !idleBusy && now >= nextIdle) {
                 nextIdle = now + quiet(real);
-                if (!(s.dontInterrupt() && realTalking(now))) idleCall = startIdle(online, now);
+                if (!(s.dontInterrupt() && realTalking(now))) idleCall = startIdle(online, now, real);
             }
             if (real == 0) nextIdle = Math.max(nextIdle, now + s.quietMin());
         }
@@ -978,19 +990,24 @@ final class TestChat implements Listener {
     // ══ 冷场闲聊 ══════════════════════════════════════════
 
     /** 开一个话题：AI 可用时交给 AI（返回要在锁外执行的调用），否则按语料。 */
-    private Runnable startIdle(Map<String, Speaker> online, long now) {
+    private Runnable startIdle(Map<String, Speaker> online, long now, int real) {
         var talkers = new ArrayList<Speaker>();
         for (Speaker speaker : online.values()) if (speaker.talkative() && !busy(speaker.key()) && !coolingDown(speaker.key(), now)) talkers.add(speaker);
         if (talkers.isEmpty()) return null;
         if (ai.usable() && ai.reserve()) {
             idleBusy = true;
             Collections.shuffle(talkers);
-            var cast = List.copyOf(talkers.subList(0, Math.min(6, talkers.size())));
+            var cast = new ArrayList<TestAi.Candidate>();
+            for (Speaker speaker : talkers.subList(0, Math.min(6, talkers.size()))) {
+                cast.add(new TestAi.Candidate(speaker.name(), speaker.persona(), activity(speaker.id()), ""));
+            }
             var context = List.copyOf(history);
-            return () -> ai.idle(cast, context, settings.ai().maxLines()).whenComplete((lines, error) -> {
+            // 一窝蜂要先定下来：让 AI 一次给出几个人抢着说的几句
+            long burst = cast.size() >= 3 ? rollBurst() : 0;
+            return () -> ai.idle(cast, context, settings.ai().maxLines(), burst != 0, real).whenComplete((lines, error) -> {
                 synchronized (this) {
                     idleBusy = false;
-                    if (error == null && lines != null && !lines.isEmpty()) chain(lines, 0, IDLE, null, System.currentTimeMillis(), rollBurst());
+                    if (error == null && lines != null) chain(fresh(lines), 0, IDLE, null, System.currentTimeMillis(), burst);
                     else if (error != null) ruleIdle(talkers, System.currentTimeMillis());
                 }
             });
@@ -1051,25 +1068,38 @@ final class TestChat implements Listener {
             boolean talking = speaker.key().equals(partnerKey);
             boolean named = mentioned != null && mentioned.key().equals(speaker.key());
             if (!talking && !named && (!speaker.talkative() || busy(speaker.key()) || coolingDown(speaker.key(), now))) continue;
-            String note = named ? "被提到了" : talking ? "正在和 " + name + " 聊天" : "";
-            candidates.add(new TestAi.Candidate(speaker.name(), speaker.persona(), note));
+            String note = named ? "被叫到了" : talking ? "正在和 " + name + " 聊天" : "";
+            candidates.add(new TestAi.Candidate(speaker.name(), speaker.persona(), activity(speaker.id()), note));
         }
         if (candidates.isEmpty()) return null;
         Collections.shuffle(candidates);
         if (candidates.size() > 8) candidates.subList(8, candidates.size()).clear();
         var context = List.copyOf(history);
         boolean interrupting = settings.dontInterrupt() && realTalking(now) && partnerKey == null && mentioned == null;
+        // 一窝蜂要先定下来：让 AI 一次给出几个人抢着回的几句；被叫到名字、别人正在聊时不起哄
+        long burst = interrupting || mentioned != null ? 0 : rollBurst();
+        int crowd = burst != 0 ? Math.min(burstSize(), candidates.size()) : 0;
+        if (crowd < 2) { burst = 0; crowd = 0; }
+        long chosen = burst;
+        int size = crowd, others = realOnline();
         String lower = text.toLowerCase(Locale.ROOT);
-        return () -> ai.reply(candidates, context, name, text, mentioned == null ? null : mentioned.name(), interrupting)
+        return () -> ai.reply(candidates, context, name, text, mentioned == null ? null : mentioned.name(), interrupting, size, others)
             .whenComplete((lines, error) -> {
                 Map<String, Speaker> current = error != null ? online() : null;
                 synchronized (this) {
                     long at = System.currentTimeMillis();
                     if (error != null) { rules(player, name, lower, mentioned, current, at); return; }
-                    if (lines.isEmpty()) return;
-                    chain(lines, 0, mentioned != null ? MENTION : REPLY, player, at, interrupting ? 0 : rollBurst());
+                    chain(fresh(lines), 0, mentioned != null ? MENTION : REPLY, player, at, chosen);
                 }
             });
+    }
+
+    /** AI 给的话里去掉最近已经有人说过的（AI 偶尔会重复）。 */
+    private List<TestAi.Reply> fresh(List<TestAi.Reply> lines) {
+        var result = new ArrayList<TestAi.Reply>();
+        var seen = new HashSet<String>();
+        for (TestAi.Reply reply : lines) if (!recentTexts.contains(reply.text()) && seen.add(reply.text())) result.add(reply);
+        return result;
     }
 
     /** 依次排队 AI 给出的几句话：前一句说出口后，再排下一句。一窝蜂时一句紧跟一句。 */
