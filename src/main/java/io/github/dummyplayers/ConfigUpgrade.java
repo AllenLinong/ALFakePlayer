@@ -12,7 +12,6 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -27,41 +26,32 @@ import java.util.regex.Pattern;
  * 读取插件目录下的配置文件。文件不存在时写入默认文件；插件更新提高了某个文件的 config_version 时，
  * 按新的默认文件升级：保留改过的值，未改动的默认值换成新默认值，原文件备份到 config-backups/。
  *
- * <p>config_version 跟随插件版本号（如 '1.0.4'）。1.0.3 及以前的文件是整数 1，比所有带点的版本都旧。</p>
+ * <p>config_version 是每个文件自己的整数版本，从 1 开始，只在这个文件的内容变了时加一。
+ * 1.0.4 写出的文件是插件版本号 '1.0.4'，内容和版本 1 相同，读取时当作 1，只把这一行改成 1。</p>
  */
 final class ConfigUpgrade {
     private static final String VERSION = "config_version";
-    private static final Pattern DOTTED = Pattern.compile("\\d+(\\.\\d+)*");
+    /** 1.0.4 用插件版本号作为 config_version（如 '1.0.4'）。 */
+    private static final Pattern DOTTED = Pattern.compile("\\d+(\\.\\d+)+");
+    private static final Pattern VERSION_LINE = Pattern.compile("(?m)^config_version:[ \\t]*['\"]?\\d+(\\.\\d+)+['\"]?[ \\t]*$");
     /**
      * 键由用户自己定的段落（如测试假人的权限组和比例）：改过就整段沿用，不和新默认值逐项合并，
      * 否则用户删掉的默认项（如 default 组）会被加回来。
      */
     private static final Map<String, Set<String>> WHOLE_SECTIONS = Map.of("tab_test.yml", Set.of("groups"));
 
-    /** 配置版本。legacy 为早期的整数版本，比所有带点的版本都旧。 */
-    record Version(String text, boolean legacy, int[] parts) implements Comparable<Version> {
+    /** 配置版本。dotted 为 1.0.4 写出的插件版本号，当作 1。 */
+    record Version(int number, boolean dotted) {
         static Version of(Object raw, String name) throws IOException {
-            if (raw == null) return new Version("0", true, new int[] {0});
-            if (raw instanceof Integer number && number >= 0) return new Version(String.valueOf(number), true, new int[] {number});
+            if (raw == null) return new Version(0, false);
+            if (raw instanceof Integer number && number >= 0) return new Version(number, false);
             String text = String.valueOf(raw).strip();
-            if (!(raw instanceof Integer) && DOTTED.matcher(text).matches()) {
-                return new Version(text, false, Arrays.stream(text.split("\\.")).mapToInt(Integer::parseInt).toArray());
-            }
-            throw new IOException(name + ": config_version must be a version like 1.0.4");
+            if (raw instanceof String && text.matches("\\d{1,9}")) return new Version(Integer.parseInt(text), false);
+            if (raw instanceof String && DOTTED.matcher(text).matches()) return new Version(1, true);
+            throw new IOException(name + ": config_version must be a whole number like 1");
         }
 
-        @Override public int compareTo(Version other) {
-            if (legacy != other.legacy) return legacy ? -1 : 1;
-            for (int index = 0; index < Math.max(parts.length, other.parts.length); index++) {
-                int mine = index < parts.length ? parts[index] : 0, theirs = index < other.parts.length ? other.parts[index] : 0;
-                if (mine != theirs) return Integer.compare(mine, theirs);
-            }
-            return 0;
-        }
-
-        @Override public boolean equals(Object other) { return other instanceof Version version && compareTo(version) == 0; }
-        @Override public int hashCode() { return Arrays.hashCode(parts) * 31 + Boolean.hashCode(legacy); }
-        @Override public String toString() { return text; }
+        @Override public String toString() { return String.valueOf(number); }
     }
     private static final List<String> MENUS = List.of("states", "main", "tier_select", "spawn_confirm",
         "teleport_confirm", "purchase_confirm", "purchase_items", "inventory", "settings");
@@ -116,10 +106,20 @@ final class ConfigUpgrade {
             throw new IOException(name + ": invalid YAML" + where, invalid);
         }
         Version sourceVersion = Version.of(saved.get(VERSION), name);
-        if (sourceVersion.compareTo(targetVersion) > 0) {
+        if (sourceVersion.number() > targetVersion.number()) {
             throw new IOException(name + " is from a newer plugin (version " + sourceVersion + "); file left unchanged");
         }
-        if (sourceVersion.equals(targetVersion)) return new Loaded(saved, null);
+        if (sourceVersion.number() == targetVersion.number()) {
+            if (!sourceVersion.dotted()) return new Loaded(saved, null);
+            // 1.0.4 的文件：内容就是版本 1，只改版本号这一行，其余内容和写法原样保留
+            saved.set(VERSION, targetVersion.number());
+            return new Loaded(saved, () -> {
+                String text = Files.readString(file, StandardCharsets.UTF_8);
+                Matcher line = VERSION_LINE.matcher(text);
+                if (!line.find()) return;
+                writeText(file, text.substring(0, line.start()) + VERSION + ": " + targetVersion + text.substring(line.end()));
+            });
+        }
         merge(current, saved, history(name, sourceVersion), menu, WHOLE_SECTIONS.getOrDefault(name, Set.of()));
         return new Loaded(current, () -> {
             Path backup = backup(name, file, sourceVersion);
@@ -153,9 +153,8 @@ final class ConfigUpgrade {
 
     /**
      * 旧版本的默认配置，用于区分改过的值和未改动的默认值（未改动的会换成新默认值）。
-     * 提高某个文件的 config_version（跟随插件版本号）时，把上一个版本的文件原样放到 config-history/v旧版本号/ 下，
-     * 例如 config.yml 从 1.0.4 升到 1.0.5 时，把 1.0.4 的 config.yml 放到 config-history/v1.0.4/config.yml。
-     * 1.0.3 及以前的文件（整数版本 1）对应 config-history/v1/。
+     * 提高某个文件的 config_version 时，把上一个版本的文件原样放到 config-history/v旧版本号/ 下，
+     * 例如 config.yml 从 1 升到 2 时，把版本 1 的 config.yml 放到 config-history/v1/config.yml。
      */
     private List<YamlConfiguration> history(String name, Version version) throws Exception {
         var defaults = resource("config-history/v" + version + "/" + name);
@@ -261,11 +260,13 @@ final class ConfigUpgrade {
         return yaml;
     }
 
-    private static void write(Path file, YamlConfiguration yaml) throws IOException {
+    private static void write(Path file, YamlConfiguration yaml) throws IOException { writeText(file, yaml.saveToString()); }
+
+    private static void writeText(Path file, String text) throws IOException {
         Files.createDirectories(file.getParent());
         Path temporary = Files.createTempFile(file.getParent(), ".afp-config-", ".tmp");
         try {
-            Files.writeString(temporary, yaml.saveToString(), StandardCharsets.UTF_8);
+            Files.writeString(temporary, text, StandardCharsets.UTF_8);
             Files.move(temporary, file, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
         } finally {
             Files.deleteIfExists(temporary);

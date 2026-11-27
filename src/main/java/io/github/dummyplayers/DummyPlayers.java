@@ -84,6 +84,8 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
     private volatile Map<DummyTier, Double> tierPrices = Map.of();
     private Groups groups = Groups.NONE;
     private volatile String luckPermsGroup = "default";
+    /** config.yml 的 easybot：EasyBot 的在线列表里加上本服的假人。 */
+    volatile EasyBotCompat.Settings easyBot = new EasyBotCompat.Settings(true, true, true);
 
     /** 测试假人的 TAB 显示名：权限组前缀 + 名字。 */
     Component testLabel(String name, String group) {
@@ -320,6 +322,8 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
         int teleportCooldown = option(config, "teleport.to_dummy_cooldown_seconds", 5, 0, 300);
         String group = config.getString("luckperms.group", "default");
         List<String> claimPlugins = List.copyOf(config.getStringList("claims.plugins"));
+        var easyBotSettings = new EasyBotCompat.Settings(config.getBoolean("easybot.enabled", true),
+            config.getBoolean("easybot.summoned_fake_players", true), config.getBoolean("easybot.test_players", true));
         return () -> {
             if (menus == null) {
                 menus = new Menus(this, menuConfig);
@@ -357,6 +361,8 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
             teleports.configure(teleportDelay, teleportCooldown);
             luckPermsGroup = group;
             ClaimIdentity.configure(claimPlugins);
+            easyBot = easyBotSettings;
+            EasyBotCompat.apply(this);
             testSettings = tests;
             testChat.configure(chat);
             skins.configure(skinsOn, skinNames, tests.names());
@@ -1318,6 +1324,7 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
     @EventHandler public void onPluginEnable(PluginEnableEvent event) {
         ClaimIdentity.refresh(null);
         ListenerGuard.install(this, getLogger());
+        if (event.getPlugin().getName().equals("EasyBot")) EasyBotCompat.apply(this);
     }
     @EventHandler public void onPluginDisable(PluginDisableEvent event) { ClaimIdentity.refresh(event.getPlugin()); }
 
@@ -2226,6 +2233,7 @@ public final class DummyPlayers extends JavaPlugin implements Listener, TabExecu
 
     @Override public void onDisable() {
         shuttingDown = true;
+        EasyBotCompat.remove(this);
         synchronized (admissions) { pending.clear(); }
         boolean stopping = Bukkit.isStopping();
         int removed = 0;

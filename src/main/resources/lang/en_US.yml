@@ -1,6 +1,6 @@
 # Config version, managed by the plugin. Do not edit. Used to upgrade this file automatically
 # after a plugin update; your changes are kept
-config_version: '1.0.4'
+config_version: 1
 
 # ============================================================
 # ALFakePlayer English messages (lang/en_US.yml)

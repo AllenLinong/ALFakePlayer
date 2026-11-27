@@ -1,5 +1,5 @@
 # 配置版本号，由插件自动管理，请勿修改。插件更新后会据此自动升级本文件，自定义内容保留
-config_version: '1.0.4'
+config_version: 1
 
 # ============================================================
 # TAB 测试假人的聊天（/afp test）
@@ -62,17 +62,18 @@ cross_server:
 #   - 冷场闲聊最多用一半的名额，给回复真人留出余地；被 @ 的回复总多留一个名额
 #   - 真人之间正在聊天时（dont_interrupt），测试假人不闲聊、不接别人的话，关键词回复的概率减半；被 @ 时照常回复
 #   - 聊天区热闹时，句间间隔自动缩短到 1/2～3/4；在线真人越多，冷场开话题的等待越短
+# 觉得测试假人话太少时，先调大 base_messages、messages_per_player 和 talkative_percent，调小 gap_seconds 和 speaker_cooldown_seconds
 limits:
   window_seconds: 60
-  base_messages: 3
-  messages_per_player: 0.5
+  base_messages: 5
+  messages_per_player: 1
   max_share_percent: 40
-  max_messages: 10
+  max_messages: 15
   dont_interrupt: true
-  # 任意两句之间至少隔多少秒（在最短和最长之间随机），保证不会同时说话
-  gap_seconds: [6, 15]
-  # 同一个测试假人说完后，多少秒内不主动开口；被 @、正在和真人对话、在闲聊对话中接话时不受限制
-  speaker_cooldown_seconds: 180
+  # 任意两句之间至少隔多少秒（在最短和最长之间随机），平时不会同时说话；一窝蜂（见下面 burst）不受这个限制
+  gap_seconds: [4, 10]
+  # 同一个测试假人说完后，多少秒内不主动开口；被 @、正在和真人对话、在闲聊对话中接话、一窝蜂时不受限制
+  speaker_cooldown_seconds: 90
   # 同一条关键词规则多少秒内只回一次（10 个人说“你好”只回一次）；规则里可以单独设 cooldown_seconds
   rule_cooldown_seconds: 30
   # 打字时间：基础秒数 + 每个字的秒数 + 0 到随机秒数，打完字才发出
@@ -81,10 +82,23 @@ limits:
   typing_random_seconds: 3
   # 打完字后排队超过多少秒还没轮到就作废，过时的回复显得假
   expire_seconds: 20
+  # 一窝蜂：按概率几个测试假人几乎同时说话，像真人群聊一样。会发生在：
+  #   - 关键词回复（例如有人问“有人吗”，几个人一起回“在”“有”“咋了”）
+  #   - 真人进服时几个人一起欢迎；测试假人进服打招呼、下线道别时几个人一起回应
+  #   - 冷场对话（dialogues）几个人你一句我一句很快说完；开了 AI 时 AI 给的几句也一样
+  # 一窝蜂里每人说不同的话，第一句照常受上面的限流，后面几句紧跟着发出，不等 gap_seconds、不看冷却，但计入句数
+  # 被 @ 的回复、真人之间正在聊天时（dont_interrupt）不会一窝蜂
+  burst:
+    # 概率（0–100），0 为关闭
+    chance: 25
+    # 一共几个人说话
+    speakers: [3, 4]
+    # 相邻两句之间隔多少秒，可以带小数；打字时间也只算一半
+    gap_seconds: [0.3, 2]
 
 # 会说话的测试假人占多少百分比（0–100）。其余的只挂在 TAB 里，被 @ 时才回
 # 由 UUID 决定，同一个人一直是“话多”或“潜水”
-talkative_percent: 30
+talkative_percent: 50
 
 # 真人和某个测试假人说过话后，多少秒内优先由这个测试假人接着聊
 conversation_seconds: 60
@@ -92,7 +106,7 @@ conversation_seconds: 60
 # ── 冷场闲聊 ──────────────────────────────────────────────
 idle:
   # 聊天区安静多少秒后（在最短和最长之间随机），由测试假人开个话题
-  quiet_seconds: [90, 240]
+  quiet_seconds: [40, 120]
   # 开话题时，多少百分比是几个测试假人之间的对话（dialogues），其余是一个人说一句（lines.idle）
   dialogue_percent: 60
 
