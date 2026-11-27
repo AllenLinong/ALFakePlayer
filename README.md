@@ -171,10 +171,13 @@ itemsadder: "namespace:item_id"     # ItemsAdder 物品
 - 装了 TrChat 时测试假人在 Normal 频道说不出话：TrChat 的防刷屏（和自己上一句太像、发言冷却、发言太频繁）会把测试假人的短句（“在”“6”）悄悄吞掉，2 秒后又按 `tab_chat.yml` 的 `format` 补发成 `<名字> 内容`，看起来就像 Normal 频道不能用。现在测试假人不受这几项限制（LuckPerms 里明确设为 false 的除外），说话的频率由 `tab_chat.yml` 的 `limits` 控制。
 - 假人皮肤经常重复：原来按 UUID 算出一项，名单里没有正版账号的名字会顺延到下一项，好几个假人挤在同一个皮肤上。现在每个假人第一次用到时挑用的人最少的一项，记在数据库里（跨服共用），名单够用时不会有两个假人同一个皮肤，名单比假人少时尽量平均。
 - 没有真人在线时，测试假人进服也会打招呼。
+- 测试假人看不出戴着称号：TAB 里测试假人的名字后面现在和召唤的假人一样带着 PlayerTitle 的称号（`%playerTitle_use%`，没戴时是 PlayerTitle 的默认称号），跨服显示的也带着。原来只有聊天格式里写了这个变量才看得到。
+- 测试假人戴上称号后，聊天、进服提示里的 `%playerTitle_use%` 可能半小时内一直显示没戴：PlayerTitle 会把不在线玩家的称号缓存 30 分钟，戴称号前解析过一次就一直是旧的。现在戴上后立即清掉这个缓存。
+- PlayerTitle 开了 `isAutoUse`（拿到称号自动使用）时，只分到 1 个称号的假人反而没戴：PlayerTitle 已经自动戴上，本插件再戴一次就切换成了摘下。没抽中佩戴的假人原来也会被自动戴上，现在按 `wear_percent` 摘下。
 
 升级须知
 
-- `config.yml`、`tab_chat.yml` 和语言文件的 `config_version` 升到 `2`，第一次启动时自动升级：改过的值保留，没改过的默认值换成新默认值，新选项（`playertitle`、`channels`、`teams`、`ai.topics`、`lines` 里 `team_` 开头的几类）自动加上，原文件备份到 `config-backups/`。
+- 所有配置文件（`config.yml`、`tab_chat.yml`、`tab_test.yml`、`database.yml`、语言文件和 `menus/` 下的菜单文件）的 `config_version` 升到 `2`，第一次启动时自动升级：改过的值保留，没改过的默认值换成新默认值，新选项（`playertitle`、`channels`、`teams`、`ai.topics`、`lines` 里 `team_` 开头的几类）自动加上，原文件备份到 `config-backups/`。
 - 升级后所有假人的皮肤重新挑一次（之后固定不变）。
 - 数据库自动加上小队一列和皮肤表，不用手动操作。
 

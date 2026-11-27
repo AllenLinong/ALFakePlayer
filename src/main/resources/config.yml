@@ -96,7 +96,8 @@ easybot:
 playertitle:
   # 装了 PlayerTitle 时，从它的称号商店里给假人随机匹配几个称号，按概率戴上一个，像真人买过、戴着称号一样
   # 每个假人只在第一次出现、还没有任何称号时匹配一次，之后由 PlayerTitle 保存，跨服、重启后都不变；没装 PlayerTitle 时不起作用
-  # 称号显示在哪里由 PlayerTitle 的变量 %playerTitle_use% 决定：聊天插件的格式、tab_chat.yml 的 format 里写了它，测试假人说话时就带着称号
+  # TAB 里假人的名字后面带着称号（PlayerTitle 的变量 %playerTitle_use%，没戴时是 PlayerTitle 的默认称号）；
+  # 聊天里要在聊天插件的格式、tab_chat.yml 的 format 里写上这个变量，测试假人说话时才带着称号
   # 修改后执行 /afp reload 生效
   enabled: true
   # /afp test 的 TAB 测试假人

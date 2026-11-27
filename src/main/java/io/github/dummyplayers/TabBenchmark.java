@@ -33,7 +33,7 @@ final class TabBenchmark {
         Action.UPDATE_GAME_MODE, Action.UPDATE_LATENCY, Action.UPDATE_DISPLAY_NAME, Action.UPDATE_HAT);
     private static final EnumSet<Action> RENAME = EnumSet.of(Action.UPDATE_DISPLAY_NAME);
 
-    /** 测试条目：游戏档案名，以及和真实假人一样的 TAB 显示名（权限组前缀 + 名字）。 */
+    /** 测试条目：游戏档案名，以及和真实假人一样的 TAB 显示名（权限组前缀 + 名字 + PlayerTitle 称号）。 */
     record Shown(String name, Component label) { }
     /** setTarget 的结果：实际的目标人数（名字不够时减少），以及陆续进出的总时长（秒，0 为立即）。 */
     record Plan(int target, int seconds) { }
@@ -51,6 +51,8 @@ final class TabBenchmark {
     private long nextChurn, nextGroupCheck, skinsChecked;
     /** 已经发给客户端的皮肤，null 为原版默认皮肤。 */
     private final Map<UUID, Skins.Texture> skins = new HashMap<>();
+    /** TAB 里名字后面的 PlayerTitle 称号，和召唤的假人一样（见 DummyNames）；进 TAB 后异步查到才有。 */
+    private final Map<UUID, Component> titles = new HashMap<>();
     private ScheduledTask task;
 
     TabBenchmark(DummyPlayers plugin) { this.plugin = plugin; }
@@ -100,6 +102,7 @@ final class TabBenchmark {
         if (count != 0) send(new ClientboundPlayerInfoRemovePacket(List.copyOf(active.keySet())));
         active.clear();
         skins.clear();
+        titles.clear();
         stop();
         if (count != 0) shareChanges();
         return count;
@@ -112,6 +115,7 @@ final class TabBenchmark {
         if (!active.isEmpty()) send(new ClientboundPlayerInfoRemovePacket(List.copyOf(active.keySet())));
         active.clear();
         skins.clear();
+        titles.clear();
         stop();
         viewers.clear();
     }
@@ -187,10 +191,10 @@ final class TabBenchmark {
         var free = freeProfiles();
         if (free.isEmpty()) return false;
         var profile = free.get(ThreadLocalRandom.current().nextInt(free.size()));
-        var shown = new Shown(profile.name(), plugin.testLabel(profile.name(), profile.group()));
+        var shown = new Shown(profile.name(), label(profile));
         active.put(profile.id(), shown);
         send(new ClientboundPlayerInfoUpdatePacket(ADD, List.of(entry(profile.id(), shown))));
-        plugin.titles().testPlayer(profile.id(), profile.name());
+        plugin.titles().testPlayer(profile.id(), profile.name(), () -> showTitle(profile));
         if (announce) {
             announce(profile, true);
             plugin.testChat().testJoined(profile.name(), profile.id());
@@ -227,6 +231,7 @@ final class TabBenchmark {
     private void remove(UUID id, boolean announce) {
         leaving.remove(id);
         skins.remove(id);
+        titles.remove(id);
         Shown shown = active.remove(id);
         if (shown == null) return;
         send(new ClientboundPlayerInfoRemovePacket(List.of(id)));
@@ -263,12 +268,41 @@ final class TabBenchmark {
             if (!changedNames.contains(key)) continue;
             var profile = plugin.testProfiles().profile(key);
             if (profile == null) continue;
-            var shown = new Shown(profile.name(), plugin.testLabel(profile.name(), profile.group()));
+            var shown = new Shown(profile.name(), label(profile));
             current.setValue(shown);
             renamed.add(sentEntry(current.getKey(), shown));
         }
         if (renamed.isEmpty()) return;
         send(new ClientboundPlayerInfoUpdatePacket(RENAME, renamed));
+        shareChanges();
+    }
+
+    private Component label(Roster.TestProfile profile) {
+        Component label = plugin.testLabel(profile.name(), profile.group());
+        Component title = titles.get(profile.id());
+        return title == null ? label : label.append(title);
+    }
+
+    /**
+     * 查到测试假人戴着的 PlayerTitle 称号后，在 TAB 里名字后面带上（没戴时是 PlayerTitle 的默认称号，和真人一样）。
+     * 在异步线程调用：变量第一次解析要查 PlayerTitle 的数据库，不能持有锁。
+     */
+    private void showTitle(Roster.TestProfile profile) {
+        String title = Papi.apply(plugin.getLogger(), Bukkit.getOfflinePlayer(profile.id()), PlayerTitles.SHOWN);
+        if (title.isBlank() || title.contains(PlayerTitles.SHOWN)) return;
+        titled(profile, plugin.legacy(title.replace('§', '&')));
+    }
+
+    private synchronized void titled(Roster.TestProfile profile, Component title) {
+        Shown current = active.get(profile.id());
+        // 已经下线了，或者名字表重载后不在了；权限组可能已经变了，按现在的档案
+        var latest = current == null ? null : plugin.testProfiles().profile(current.name());
+        if (latest == null || !latest.id().equals(profile.id())) return;
+        titles.put(profile.id(), title);
+        var shown = new Shown(latest.name(), label(latest));
+        if (shown.equals(current)) return;
+        active.put(profile.id(), shown);
+        send(new ClientboundPlayerInfoUpdatePacket(RENAME, List.of(sentEntry(profile.id(), shown))));
         shareChanges();
     }
 
