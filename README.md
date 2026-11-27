@@ -34,7 +34,7 @@
 
 ## 安装
 
-1. 把 `ALFakePlayer-1.0.4.jar` 放进 `plugins/`，重启服务器。
+1. 把 `ALFakePlayer-1.0.5.jar` 放进 `plugins/`，重启服务器。
 2. 首次启动会在 `plugins/ALFakePlayer/` 下生成 `config.yml`、`database.yml`、`menus/` 和 `lang/`。
 3. 召唤假人默认要扣金币，需要安装 Vault 和经济插件。不想收费的话，在 `config.yml` 中设置 `economy.enabled: false`。
 
@@ -153,7 +153,7 @@ itemsadder: "namespace:item_id"     # ItemsAdder 物品
 
 ## 更新内容
 
-### 1.0.4
+### 1.0.5
 
 新增
 
@@ -161,12 +161,8 @@ itemsadder: "namespace:item_id"     # ItemsAdder 物品
 - **AI 聊天更像真人**：提示词重写，给模型示范国内玩家的打字习惯（短、不加句号、随手打、少叫名字、不客服腔），并告诉它现在几点、每个测试假人正在游戏里做什么（`ai.activities`，每人每 30～60 分钟换一件）。自带梗表（`ai.memes`，网络梗和 MC 梗），每次随机挑 15 个给 AI，大概每三四句有一句带梗。一窝蜂时直接让 AI 给出三四个人各不相同的抢答。AI 回复里带上自己名字、整句加引号、句末句号的会自动去掉，和最近重复的话不发。新增 `ai.timezone`（默认 `Asia/Shanghai`）。
 - **EasyBot 兼容**：装了 EasyBot（QQ 群服互通）时，群里查询本服在线玩家，列表里也有本服召唤的假人和 TAB 测试假人，和真人一样（带皮肤）。`config.yml` 的 `easybot` 可以关闭，或只列其中一种。
 
-- **假人皮肤**：召唤的假人和 TAB 测试假人随机套上正版皮肤，同一个假人一直是同一个皮肤，皮肤外层（头发、帽子、外套等）全部显示。皮肤从 `config.yml` 的 `skins.names` 里挑，留空时用 `tab_test.yml` 的名字表，没有正版账号的名字自动跳过。装了 SkinsRestorer 时通过它获取（用它的缓存和代理设置，名单里还可以填皮肤图片链接），没装时直接从 Mojang 获取；获取到的皮肤保存在 `skin-cache.yml`，之后不再联网。召唤时最多等 4 秒皮肤，没等到先用默认皮肤，下次召唤换上；TAB 测试假人获取到后立即换上。
-- **测试假人跨服聊天**：`database.yml` 用 mysql 时，全网的测试假人和真人在同一个聊天里。任何子服的真人说话、进服，测试假人都会回应，从别的子服换过来的不算进服；话从测试假人所在的子服说出来，所有子服都能看到。适用于所有聊天插件：聊天插件已经把这句话跨服转发过来的，本插件不再补发，没转发的由本插件按 `format` 补发（`tab_chat.yml` 的 `cross_server.forwarded`，默认自动判断）。各子服聊天本来不互通时，设置 `cross_server.enabled: false`，测试假人只在自己的子服聊天。`/afp test chat` 显示由哪个子服安排聊天。
-
 修复
 
-- `tab_test.yml` 的 `groups` 用带点的组名（如 `lv.1`）时读取失败。
 - 装了 TrChat 等聊天插件时测试假人不说话：
   - 代理频道（如 TrChat 的 `Global`）要通过发言人的连接转发给代理端，测试假人没有连接，消息发不出去；现在借一个在线真人的连接发出去。
   - 频道的发言权限、格式条件现在按测试假人在 LuckPerms 里的权限组判断，和同组的真人一样；聊天格式里的 `%player_world%`、`%player_ping%` 等变量也有值了。
@@ -174,13 +170,29 @@ itemsadder: "namespace:item_id"     # ItemsAdder 物品
   - 游戏里用 `/afp test say` 时报错（`AsyncPlayerChatEvent may only be triggered asynchronously`），之后所有测试假人的话都改成按 `format` 发，直到 `/afp reload`。
 - 测试假人说话太少：默认限流放宽（每分钟 5 句起、每多一个真人多 1 句、最多 15 句，句间间隔 4～10 秒，同一个人 90 秒后可以再主动开口，一半的测试假人会说话，冷场 40～120 秒开话题）。已有的 `tab_chat.yml` 不会自动改，觉得话少时参照新的默认值调大 `limits` 和 `talkative_percent`。
 - `tab_chat.yml` 的 `format` 和 `tab_test.yml` 的进退服提示格式不认 PlaceholderAPI 变量（如 `%luckperms_suffix%` 原样显示）。现在任何插件的变量都能用，按这个测试假人解析，和真人一样；变量返回的 `§` 颜色和 `&#RRGGBB` 十六进制颜色都能显示，消息内容里的 `%` 不会被当成变量。
+
+升级须知
+
+- 配置、菜单和语言文件的 `config_version` 不再跟随插件版本号，改回每个文件自己的整数，现在全部是 `1`，以后哪个文件有改动就单独加一，插件据此自动升级（改过的值保留，没改过的默认值换成新默认值，新选项自动加上，原文件备份到 `config-backups/`）。
+- 1.0.4 写出的 `config_version: '1.0.4'` 第一次启动 1.0.5 时自动改成 `1`，只改这一行，其他内容和写法不变。
+- 已有的文件不会自动补上 1.0.5 新增的选项：`config.yml` 的 `easybot`，`tab_chat.yml` 的 `limits.burst`、`ai.timezone`、`ai.activities`、`ai.memes`（从 1.0.3 及更早版本升级时还有 1.0.4 新增的 `config.yml` 的 `skins` 和 `tab_chat.yml` 的 `cross_server`）。这些选项缺少时按默认值生效，需要修改时参照插件自带的文件手动加上。
+
+### 1.0.4
+
+新增
+
+- **假人皮肤**：召唤的假人和 TAB 测试假人随机套上正版皮肤，同一个假人一直是同一个皮肤，皮肤外层（头发、帽子、外套等）全部显示。皮肤从 `config.yml` 的 `skins.names` 里挑，留空时用 `tab_test.yml` 的名字表，没有正版账号的名字自动跳过。装了 SkinsRestorer 时通过它获取（用它的缓存和代理设置，名单里还可以填皮肤图片链接），没装时直接从 Mojang 获取；获取到的皮肤保存在 `skin-cache.yml`，之后不再联网。召唤时最多等 4 秒皮肤，没等到先用默认皮肤，下次召唤换上；TAB 测试假人获取到后立即换上。
+- **测试假人跨服聊天**：`database.yml` 用 mysql 时，全网的测试假人和真人在同一个聊天里。任何子服的真人说话、进服，测试假人都会回应，从别的子服换过来的不算进服；话从测试假人所在的子服说出来，所有子服都能看到。适用于所有聊天插件：聊天插件已经把这句话跨服转发过来的，本插件不再补发，没转发的由本插件按 `format` 补发（`tab_chat.yml` 的 `cross_server.forwarded`，默认自动判断）。各子服聊天本来不互通时，设置 `cross_server.enabled: false`，测试假人只在自己的子服聊天。`/afp test chat` 显示由哪个子服安排聊天。
+
+修复
+
+- `tab_test.yml` 的 `groups` 用带点的组名（如 `lv.1`）时读取失败。
 - 其他插件处理假人的交互、挖掘、放置、钓鱼、进食事件时报错（例如 GuibindPro 的空指针，因为假人不触发进服事件），不再每挖一下刷一次屏，每个插件只在后台提示一次。
 
 升级须知
 
-- 所有配置、菜单和语言文件的 `config_version` 统一为整数 `1`，以后哪个文件有改动就单独加一，插件据此自动升级：改过的值保留，没改过的默认值换成新默认值，新选项自动加上，原文件备份到 `config-backups/`。
-- 之前的 1.0.4 写出的 `config_version: '1.0.4'` 启动时自动改成 `1`，只改这一行，其他内容和写法不变。
-- 已有的文件不会自动补上新增的选项：`config.yml` 的 `easybot`、`tab_chat.yml` 的 `limits.burst` 和 `ai.timezone`、`ai.activities`、`ai.memes`（从 1.0.3 及更早版本升级时还有 `config.yml` 的 `skins` 和 `tab_chat.yml` 的 `cross_server`）。这些选项缺少时按默认值生效，需要修改时参照插件自带的文件手动加上。
+- 配置文件的 `config_version` 改为跟随插件版本号（`'1.0.4'`）。第一次启动 1.0.4 时，所有配置、菜单和语言文件自动升级：改过的值保留，没改过的默认值换成新默认值，新选项自动加上，原文件备份到 `config-backups/`。`tab_test.yml` 的 `groups` 改过时整段保留，不会把 `default` 组加回来。
+- 升级后的文件由插件重新写出，列表会变成每项一行的写法，内容不变。
 
 ### 1.0.3
 

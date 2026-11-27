@@ -3,7 +3,7 @@ plugins {
     id("com.gradleup.shadow") version "9.6.1"
 }
 group = "io.github.dummyplayers"
-version = "1.0.4"
+version = "1.0.5"
 repositories {
     mavenCentral()
     maven("https://repo.extendedclip.com/releases/")
