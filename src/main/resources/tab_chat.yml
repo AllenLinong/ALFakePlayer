@@ -25,7 +25,9 @@ enabled: true
 send_mode: auto
 
 # format 方式的格式，要和服务器给真人用的聊天格式一致，否则一眼就能看出来；跨服时本插件补发其他子服测试假人的话也用这个格式
-# 可用 %prefix% 权限组前缀、%name% 名字、%message% 内容；支持 & 颜色代码。原版格式是 "<%name%> %message%"
+# 可用 %prefix% 权限组前缀、%name% 名字、%message% 内容；支持 & 颜色代码和 &#RRGGBB 十六进制颜色。原版格式是 "<%name%> %message%"
+# 装了 PlaceholderAPI 时，任何插件的变量都能用，按这个测试假人解析，和真人一样，例如 %luckperms_prefix%、%luckperms_suffix%、
+# %vault_prefix%、%player_world%。用到变量时，测试假人说话前会在 LuckPerms 里建一个用户并加入它的权限组（同 chat 方式）
 format: "<%name%> %message%"
 
 # 真人的消息被聊天事件取消后还要不要听：TrChat 这类聊天插件会取消原版聊天、自己重新发送，不听就收不到真人的消息

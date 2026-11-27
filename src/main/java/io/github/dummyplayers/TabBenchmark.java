@@ -236,10 +236,18 @@ final class TabBenchmark {
     private void announce(Roster.TestProfile profile, boolean joined) {
         var settings = plugin.testProfiles().settings();
         String format = joined ? settings.joinFormat() : settings.quitFormat();
-        Component message = format.isBlank()
-            ? Component.translatable(joined ? "multiplayer.player.joined" : "multiplayer.player.left",
-                NamedTextColor.YELLOW, Component.text(profile.name()))
-            : plugin.legacy(format.replace("%prefix%", plugin.groupPrefix(profile.group())).replace("%name%", profile.name()));
+        if (format.isBlank()) {
+            broadcast(Component.translatable(joined ? "multiplayer.player.joined" : "multiplayer.player.left",
+                NamedTextColor.YELLOW, Component.text(profile.name())));
+            return;
+        }
+        // 填 PlaceholderAPI 变量前要等 LuckPerms 加载测试假人的用户，不能在本对象的锁里等
+        if (!plugin.isEnabled()) return;
+        Bukkit.getAsyncScheduler().runNow(plugin, unused ->
+            broadcast(plugin.legacy(plugin.testChat().fill(format, profile.id(), profile.name(), profile.group(), ""))));
+    }
+
+    private static void broadcast(Component message) {
         for (Player player : Bukkit.getOnlinePlayers()) {
             if (!(player instanceof CraftPlayer craft) || !(craft.getHandle() instanceof NativeDummy)) player.sendMessage(message);
         }

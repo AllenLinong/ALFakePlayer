@@ -504,10 +504,30 @@ final class TestChat implements Listener {
 
     /** 按 tab_chat.yml 的 format 发给本服的真人。 */
     private void sendFormatted(Speaker speaker, String text) {
-        String line = settings.format().replace("%prefix%", plugin.groupPrefix(speaker.group())).replace("%name%", speaker.name())
-            .replace("%message%", text);
-        Component message = plugin.legacy(line);
+        Component message = plugin.legacy(fill(settings.format(), speaker.id(), speaker.name(), speaker.group(), text));
         for (Player player : Bukkit.getOnlinePlayers()) if (real(player)) player.sendMessage(message);
+    }
+
+    /** 放消息内容的占位：PlaceholderAPI 解析完才换成内容，内容里的 % 不会被当成变量。 */
+    private static final String MESSAGE = "\u0000message\u0000";
+
+    /**
+     * 填好给测试假人用的格式（tab_chat.yml 的 format、tab_test.yml 的进退服提示）：%prefix%、%name%、%message%，
+     * 以及所有 PlaceholderAPI 变量。变量按这个测试假人解析，和它走聊天流程时聊天插件看到的一样（见 {@link VoicePlayer}）；
+     * 解析前先准备好它的 LuckPerms 用户，%luckperms_suffix% 这类变量才有值。id 为 null 时只解析和玩家无关的变量。
+     * 会等 LuckPerms 最多 3 秒，要在异步线程调用，也不能持有 TabBenchmark 的锁。
+     */
+    String fill(String format, UUID id, String name, String group, String message) {
+        String line = format.replace("%prefix%", plugin.groupPrefix(group)).replace("%name%", name).replace("%message%", MESSAGE);
+        if (line.indexOf('%') >= 0 && Papi.enabled()) {
+            Player player = null;
+            if (id != null) {
+                if (!group.isBlank()) prepareUser(id, name, group);
+                player = voice(id, name).getBukkitEntity();
+            }
+            line = Papi.apply(plugin.getLogger(), player, line).replace('§', '&');
+        }
+        return line.replace(MESSAGE, message);
     }
 
     /** 负责安排的子服让本服的测试假人说一句。它已经不在本服 TAB 中时不说。 */
@@ -533,36 +553,41 @@ final class TestChat implements Listener {
      * 测试假人的对象不在世界里，也不在玩家列表里。消息被取消、而且没有会自己重新发送的聊天插件时，返回 false 改用 format。
      */
     private boolean chat(Speaker speaker, String text) {
-        prepareUser(speaker);
-        ServerPlayer voice = voices.computeIfAbsent(speaker.id(), id -> {
-            MinecraftServer server = MinecraftServer.getServer();
-            var world = Bukkit.getWorlds().getFirst();
-            ServerLevel level = ((CraftWorld) world).getHandle();
-            var created = new ServerPlayer(server, level, plugin.skins().profile(id, speaker.name()), ClientInformation.createDefault());
-            // 借真人连接发插件消息、按 LuckPerms 回答权限，见 VoicePlayer；站在主世界出生点（聊天插件的坐标、世界变量）
-            NativeDummy.useBukkitEntity(created, new VoicePlayer(plugin, server.server, created));
-            var spawn = world.getSpawnLocation();
-            created.setPos(spawn.getX(), spawn.getY(), spawn.getZ());
-            return created;
-        });
+        prepareUser(speaker.id(), speaker.name(), speaker.group());
+        ServerPlayer voice = voice(speaker.id(), speaker.name());
         lastVoiceCancelled = null;
         new ChatProcessor(MinecraftServer.getServer(), voice, PlayerChatMessage.unsigned(speaker.id(), text), true).process();
         Boolean cancelled = lastVoiceCancelled;
         return cancelled == null || !cancelled || listenCancelled();
     }
 
+    /** 测试假人说话、解析变量时用的玩家对象。它不在世界里，也不在玩家列表里。 */
+    private ServerPlayer voice(UUID id, String name) {
+        return voices.computeIfAbsent(id, unused -> {
+            MinecraftServer server = MinecraftServer.getServer();
+            var world = Bukkit.getWorlds().getFirst();
+            ServerLevel level = ((CraftWorld) world).getHandle();
+            var created = new ServerPlayer(server, level, plugin.skins().profile(id, name), ClientInformation.createDefault());
+            // 借真人连接发插件消息、按 LuckPerms 回答权限，见 VoicePlayer；站在主世界出生点（聊天插件的坐标、世界变量）
+            NativeDummy.useBukkitEntity(created, new VoicePlayer(plugin, server.server, created));
+            var spawn = world.getSpawnLocation();
+            created.setPos(spawn.getX(), spawn.getY(), spawn.getZ());
+            return created;
+        });
+    }
+
     /**
-     * 聊天插件按 LuckPerms 读取前缀：每次说话前确保测试假人的 UUID 有 LuckPerms 用户、在它的权限组里，
+     * 聊天插件和 PlaceholderAPI 按 LuckPerms 读取前缀：每次说话前确保测试假人的 UUID 有 LuckPerms 用户、在它的权限组里，
      * 并且已加载（不在线的用户会被 LuckPerms 定时卸载）。最多等 3 秒，失败时照样发出，只是可能没有前缀。
      */
-    private void prepareUser(Speaker speaker) {
+    private void prepareUser(UUID id, String name, String group) {
         try {
-            plugin.groups().prepareUser(speaker.id(), speaker.name(), speaker.group()).get(3, TimeUnit.SECONDS);
+            plugin.groups().prepareUser(id, name, group).get(3, TimeUnit.SECONDS);
         } catch (Exception error) {
             long now = System.currentTimeMillis();
             if (now - lastUserWarning < 60_000) return;
             lastUserWarning = now;
-            plugin.getLogger().log(Level.WARNING, "Could not prepare the LuckPerms user of test player " + speaker.name(), error);
+            plugin.getLogger().log(Level.WARNING, "Could not prepare the LuckPerms user of test player " + name, error);
         }
     }
 

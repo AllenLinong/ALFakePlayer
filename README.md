@@ -167,6 +167,7 @@ itemsadder: "namespace:item_id"     # ItemsAdder 物品
   - 频道的发言权限、格式条件现在按测试假人在 LuckPerms 里的权限组判断，和同组的真人一样；聊天格式里的 `%player_world%`、`%player_ping%` 等变量也有值了。
   - 交给聊天插件后 2 秒内本服没有真人收到这句话时，改按 `tab_chat.yml` 的 `format` 发出，并在后台提示一次原因，不会再悄悄没了。
   - 游戏里用 `/afp test say` 时报错（`AsyncPlayerChatEvent may only be triggered asynchronously`），之后所有测试假人的话都改成按 `format` 发，直到 `/afp reload`。
+- `tab_chat.yml` 的 `format` 和 `tab_test.yml` 的进退服提示格式不认 PlaceholderAPI 变量（如 `%luckperms_suffix%` 原样显示）。现在任何插件的变量都能用，按这个测试假人解析，和真人一样；变量返回的 `§` 颜色和 `&#RRGGBB` 十六进制颜色都能显示，消息内容里的 `%` 不会被当成变量。
 - 其他插件处理假人的交互、挖掘、放置、钓鱼、进食事件时报错（例如 GuibindPro 的空指针，因为假人不触发进服事件），不再每挖一下刷一次屏，每个插件只在后台提示一次。
 
 升级须知

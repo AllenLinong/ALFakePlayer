@@ -367,9 +367,8 @@ final class TestChatNetwork {
 
     /** 按本服 tab_chat.yml 的 format 发给本服真人。 */
     private void show(String name, String group, String text) {
-        String line = chat.settings().format().replace("%prefix%", plugin.groupPrefix(group)).replace("%name%", name)
-            .replace("%message%", text);
-        Component message = plugin.legacy(line);
+        var profile = plugin.testProfiles().profile(name);
+        Component message = plugin.legacy(chat.fill(chat.settings().format(), profile == null ? null : profile.id(), name, group, text));
         var packet = new ClientboundSystemChatPacket(message, false);
         synchronized (seen) {
             own.addLast(packet);
